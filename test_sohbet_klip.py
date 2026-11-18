@@ -79,12 +79,12 @@ class KomutEleme(unittest.TestCase):
                     self.m("!ümit", bildirim=True)]                  # önce bildirim
         kalan, say = sk.ele(mesajlar)
         self.assertEqual([m["metin"] for m in kalan], ["geçti", "bu !ümit ne işe yarıyor"])
-        self.assertEqual(dict(say), {"bot": 1, "bildirim": 1, "komut": 4, "link": 1})
+        self.assertEqual(dict(say), {"bot": 1, "bildirim": 1, "komut": 4, "link": 1, "selam": 0})
 
     def test_komut_yigini_patlama_olmaz(self):
         # 04:09:30 benzeri: 50 kişi !ümit yazıyor, 2 gerçek mesaj var
         mesajlar = [self.m("!ümit", ad=f"k{i}") for i in range(50)]
-        mesajlar += [self.m("FÜMEZ kazansın burda bari"), self.m("selam")]
+        mesajlar += [self.m("FÜMEZ kazansın burda bari"), self.m("oha geçti")]
         kalan, say = sk.ele(mesajlar)
         self.assertEqual(len(kalan), 2)
         self.assertEqual(say["komut"], 50)

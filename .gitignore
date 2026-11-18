@@ -16,3 +16,6 @@ __pycache__/
 
 # Üretim akışı (uretim.py): videolar ve kişisel inceleme kaydı
 yayinlar/*/uretim/
+
+# İndirilen modeller (kaynakları kamera_tespit.py / ses_ayristir.py içinde)
+modeller/*.onnx

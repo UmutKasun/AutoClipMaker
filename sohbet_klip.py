@@ -212,13 +212,51 @@ def oku_kick(veri):
     return mesajlar, emotelar, sure
 
 
-def kick_indir(vid):
-    hedef = Path(f"kick-{vid}.json")
+KICK_URL = re.compile(r"kick\.com/([^/\s]+)/videos?/([A-Za-z0-9-]+)")
+KICK_KAPSAM_TOLERANS = 120       # sn: başlangıca bu kadar yaklaşılmadıysa sohbet eksik sayılır
+
+
+def uuid7_zamani(vid):
+    """UUIDv7'nin ilk 48 biti oluşturma zamanıdır (ms); değilse None."""
+    h = vid.replace("-", "").lower()
+    if len(h) != 32 or h[12] != "7" or not re.fullmatch(r"[0-9a-f]{32}", h):
+        return None
+    return datetime.fromtimestamp(int(h[:12], 16) / 1000, timezone.utc)
+
+
+def kick_video_bilgisi(vid, kanal=None):
+    """v1/video yanıtı. Kick web bağlantıları yeni UUIDv7 kimlik kullanıyor, API eski
+    kimliği bekliyor: 404 olursa kanalın video listesinde başlangıç zamanından eşlenir."""
+    try:
+        return http_json(f"https://kick.com/api/v1/video/{vid}")
+    except urllib.error.HTTPError as e:
+        if e.code != 404 or not kanal:
+            raise
+    t = uuid7_zamani(vid)
+    liste = http_json(f"https://kick.com/api/v2/channels/{kanal}/videos")
+    uuidler = [(x.get("video") or {}).get("uuid") for x in liste]
+    if vid in uuidler:
+        sys.exit(f"Kick videosu {vid} listede var ama API 404 döndü.")
+    eslesen = [x for x in liste if t and x.get("start_time")
+               and abs((tarih(x["start_time"]) - t).total_seconds()) <= 2]
+    if len(eslesen) != 1:
+        sys.exit(f"Kick videosu bulunamadı: {vid} (API 404; kanal '{kanal}' listesindeki "
+                 f"{len(liste)} videodan {len(eslesen)} tanesi zamanla eşleşti)")
+    eski = eslesen[0]["video"]["uuid"]
+    print(f"Kick kimliği eşlendi: {vid} -> {eski} (başlangıç {eslesen[0]['start_time']} UTC)")
+    return http_json(f"https://kick.com/api/v1/video/{eski}")
+
+
+def kick_indir(vid, kanal=None, hedef=None):
+    hedef = Path(hedef or f"kick-{vid}.json")
     if hedef.exists():
+        veri = json.loads(hedef.read_text(encoding="utf-8"))
+        if (veri.get("kapsam") or {}).get("tamamlandi") is False:
+            sys.exit(f"Önbellekteki Kick sohbeti eksik: {hedef}; silip yeniden indirin.")
         print(f"Kick sohbeti önbellekten: {hedef}")
-        return json.loads(hedef.read_text(encoding="utf-8"))
+        return veri
     print(f"Kick video bilgisi alınıyor: {vid}")
-    meta = http_json(f"https://kick.com/api/v1/video/{vid}")
+    meta = kick_video_bilgisi(vid, kanal)
     ls = meta.get("livestream") or {}
     kanal = ls.get("channel_id") or meta.get("channel_id")
     bas_s = ls.get("start_time") or meta.get("start_time")
@@ -228,13 +266,16 @@ def kick_indir(vid):
     bas_us = int(tarih(bas_s).timestamp() * 1_000_000)
     imlec = bas_us + int(sure_ms) * 1000
     toplam_us = imlec - bas_us
-    mesajlar, sayfa = {}, 0
+    mesajlar, sayfa, bitis = {}, 0, None
     print("Sohbet sondan başa doğru indiriliyor...")
     while True:
-        d = http_json(f"https://kick.com/api/v2/channels/{kanal}/messages?cursor={imlec}")
+        d = http_json(f"https://kick.com/api/v2/channels/{kanal}/messages?cursor={imlec}", deneme=8)
         data = d.get("data") or {}
         for m in data.get("messages") or []:
-            mesajlar[m.get("id") or (m.get("created_at"), m.get("content"))] = m
+            # yalnız oku_kick'in kullandığı alanlar (tam nesne yayın başına yüzlerce MB eder)
+            mesajlar[m.get("id") or (m.get("created_at"), m.get("content"))] = {
+                "id": m.get("id"), "created_at": m.get("created_at"), "content": m.get("content"),
+                "type": m.get("type"), "sender": {"username": (m.get("sender") or {}).get("username")}}
         sayfa += 1
         if sayfa % 20 == 0:
             yuzde = 100 * (1 - (imlec - bas_us) / toplam_us)
@@ -242,26 +283,44 @@ def kick_indir(vid):
         try:
             yeni = int(data.get("cursor"))
         except (TypeError, ValueError):
+            bitis = "cursor yok"
             break
-        if yeni >= imlec or yeni < bas_us:
+        if yeni < bas_us:
+            bitis = "yayın başlangıcına ulaşıldı"
+            break
+        if yeni >= imlec:
+            bitis = "cursor ilerlemedi"
             break
         imlec = yeni
         time.sleep(0.15)
+    kalan = max(0.0, (imlec - bas_us) / 1_000_000)
+    tamam = bitis == "yayın başlangıcına ulaşıldı" or kalan <= KICK_KAPSAM_TOLERANS
     liste = sorted(mesajlar.values(), key=lambda m: str(m.get("created_at", "")))
-    veri = {"platform": "kick", "video_id": vid, "channel_id": kanal,
-            "start_time": bas_s, "duration": sure_ms, "messages": liste}
+    veri = {"platform": "kick", "video_id": vid, "api_uuid": meta.get("uuid"), "channel_id": kanal,
+            "channel_slug": (ls.get("channel") or {}).get("slug"), "session_title": ls.get("session_title"),
+            "language": ls.get("language"), "source": meta.get("source"),
+            "start_time": bas_s, "duration": sure_ms,
+            "kapsam": {"tamamlandi": tamam, "bitis_nedeni": bitis, "kapsanmayan_bas_sn": round(kalan, 1),
+                       "sayfa": sayfa},
+            "messages": liste}
+    if not tamam:
+        eksik = hedef.with_suffix(".eksik.json")
+        eksik.write_text(json.dumps(veri, ensure_ascii=False), encoding="utf-8")
+        sys.exit(f"Kick sohbeti EKSİK: {bitis}; yayının ilk {kalan:.0f} sn'si indirilemedi. "
+                 f"Kısmi veri {eksik} (kullanılmaz).")
     gecici = hedef.with_suffix(".json.part")
     gecici.write_text(json.dumps(veri, ensure_ascii=False), encoding="utf-8")
     gecici.replace(hedef)
-    print(f"Kick sohbeti kaydedildi: {hedef} ({len(liste)} mesaj)")
+    print(f"Kick sohbeti kaydedildi: {hedef} ({len(liste)} mesaj, {sayfa} sayfa, {bitis})")
     return veri
 
 
 def sohbet_oku(kaynak):
     """(platform, mesajlar, emote kümesi, yayın süresi, ham twitch verisi)"""
-    km = re.search(r"kick\.com/[^/\s]+/videos?/([A-Za-z0-9-]+)", kaynak)
+    km = KICK_URL.search(kaynak)
     if km:
-        return ("Kick",) + oku_kick(kick_indir(km.group(1))) + (None,)
+        veri = kick_indir(km.group(2), km.group(1))
+        return ("Kick",) + oku_kick(veri) + (veri,)
     yol = Path(kaynak)
     if not yol.exists():
         sys.exit(f"Sohbet dosyası bulunamadı: {kaynak}")
@@ -272,7 +331,9 @@ def sohbet_oku(kaynak):
     if isinstance(veri, dict) and "comments" in veri:
         return ("Twitch",) + oku_twitch(veri) + (veri,)
     if isinstance(veri, dict) and "start_time" in veri and "messages" in veri:
-        return ("Kick",) + oku_kick(veri) + (None,)
+        if (veri.get("kapsam") or {}).get("tamamlandi") is False:
+            sys.exit(f"Kick sohbeti eksik ({veri['kapsam'].get('bitis_nedeni')}); kullanılmadı: {kaynak}")
+        return ("Kick",) + oku_kick(veri) + (veri,)
     if veri is None or (isinstance(veri, dict) and "replayChatItemAction" in veri):
         return ("YouTube",) + oku_youtube(yol) + (None,)
     sys.exit("Sohbet biçimi tanınamadı (Twitch chat.json, YouTube .live_chat.json "
@@ -345,10 +406,32 @@ def bot_mu(ad):
     return a.endswith("bot") or a in BILINEN_BOTLAR
 
 
+def _sikistir(w):
+    return re.sub(r"(.)\1+", r"\1", w)                 # selammm -> selam, abii -> abi
+
+
+# Yalnız selamlaşma/vedalaşma olan mesajlar (yayın başı/sonu "iyi geceler" yağmuru an değildir).
+# Mesajın her kelimesi SELAM_ASIL ya da SELAM_EK'te olmalı, en az biri SELAM_ASIL'da.
+SELAM_ASIL = {_sikistir(w) for w in """selam slm sa sea selamün selamun selamunaleyküm aleyküm aleykum
+aleykümselam as merhaba merhabalar mrb meraba hoşgeldin hosgeldin hoşgeldiniz hg hoşbulduk hosbulduk hb
+geldin geceler akşamlar aksamlar yayınlar yayinlar görüşürüz gorusuruz görüşmek gorusmek
+günaydın gunaydin uykular baybay bb gelsin hi hello hey yo hallo servus moin gn goodnight night
+bye byebye cya morning gm nacht tschüss tschüs tschau ciao n8 abend morgen""".split()}
+SELAM_EK = {_sikistir(w) for w in """iyi hoş hos kolay good gute guten see you bis dir dich euch herkese
+abi abim abicim abla kanka kardeşim hocam reis kral chat all everyone guys leute alle ve and und
+tekrar yine sana size""".split()}
+
+
+def selam_mi(metin):
+    w = [_sikistir(tr_lower(x)) for x in re.findall(r"[^\W\d_]+", metin)]
+    return 0 < len(w) <= 6 and all(x in SELAM_ASIL or x in SELAM_EK for x in w) \
+        and any(x in SELAM_ASIL for x in w)
+
+
 def ele(mesajlar):
     """Sayılacak mesajları ve elenenlerin sayaçlarını döndürür.
-    Sıra: bot > bildirim > komut (!ümit gibi) > link."""
-    say = Counter(bot=0, bildirim=0, komut=0, link=0)
+    Sıra: bot > bildirim > komut (!ümit gibi) > link > selamlaşma."""
+    say = Counter(bot=0, bildirim=0, komut=0, link=0, selam=0)
     kalan = []
     for m in mesajlar:
         if bot_mu(m["ad"]):
@@ -359,6 +442,8 @@ def ele(mesajlar):
             say["komut"] += 1
         elif LINK.search(m["metin"]):
             say["link"] += 1
+        elif selam_mi(m["metin"]):
+            say["selam"] += 1
         else:
             kalan.append(m)
     return kalan, say
@@ -735,7 +820,7 @@ def main():
     print(f"Platform        : {platform}")
     print(f"Toplam mesaj    : {len(mesajlar)}")
     print(f"Elenen          : {elenen['bot']} bot, {elenen['bildirim']} bildirim, "
-          f"{elenen['komut']} komut, {elenen['link']} link -> sayılan {len(kalan)}")
+          f"{elenen['komut']} komut, {elenen['link']} link, {elenen['selam']} selamlaşma -> sayılan {len(kalan)}")
     print(f"Dil             : {dil}")
     print(f"Dilim           : {n_dilim} x {a.dilim:g} sn")
     print(f"Ortalama        : {ozet['ort']:.2f} mesaj/dilim, kişi başı en fazla {KISI_TAVAN} "

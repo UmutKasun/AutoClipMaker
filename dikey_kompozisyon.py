@@ -63,11 +63,21 @@ def yerlestir(giris, b, kw, kh, cikis):
             f"[{cikis}_arka][{cikis}_on]overlay=(W-w)/2:(H-h)/2[{cikis}]")
 
 
-def filtre_olustur(kamera, pencere, oyun, oyun_araliklari, ust_oran):
+def maskele(giris, m, cikis):
+    """Kamera alt bölümde ikinci kez görünmesin: o dikdörtgen bulanık ve karartılmış."""
+    x, y, w, h = m
+    r = max(1, min(24, min(w, h) // 4 - 1))
+    return (f"[{giris}]split=2[{cikis}_0][{cikis}_1];[{cikis}_1]crop={w}:{h}:{x}:{y},"
+            f"boxblur={r}:4,eq=brightness=-0.3:saturation=0.5[{cikis}_b];"
+            f"[{cikis}_0][{cikis}_b]overlay={x}:{y}[{cikis}]")
+
+
+def filtre_olustur(kamera, pencere, oyun, oyun_araliklari, ust_oran, maske=None):
     ust = cift(YUK * ust_oran)
     alt = YUK - ust
     oyunlu = bool(oyun_araliklari)
-    parcalar = [f"[0:v]split={3 if oyunlu else 2}[k][p]{'[o]' if oyunlu else ''}",
+    parcalar = [f"[0:v]split={3 if oyunlu else 2}[k][p0]{'[o]' if oyunlu else ''}",
+                maskele("p0", maske, "p") if maske else "[p0]null[p]",
                 yerlestir("k", kamera, GEN, ust, "ust"),
                 yerlestir("p", pencere, GEN, alt, "pen")]
     if oyunlu:
@@ -145,6 +155,8 @@ def main():
     ap.add_argument("--pencere", help=f"x1,y1,x2,y2 kaynak pikseli; profili geçersiz kılar ({PENCERE})")
     ap.add_argument("--oyun-bolge", help=f"x1,y1,x2,y2 kaynak pikseli; profili geçersiz kılar ({OYUN})")
     ap.add_argument("--ust-oran", type=float, help="üst bölüm oranı (profil ya da 0.34)")
+    ap.add_argument("--maske", help="x1,y1,x2,y2: alt bölümde bulanıklaştırılacak bölge "
+                    "(oyun kırpımına düşen kamera; yayıncı iki kez görünmesin)")
     ap.add_argument("--guvenli", action="store_true",
                     help="güvenli tam görüntü: kırpma yok, kaynak karenin tamamı sığdırılır")
     ap.add_argument("--filtre-goster", action="store_true", help="filter_complex'i yazdır")
@@ -158,7 +170,7 @@ def main():
     if a.guvenli:
         catisan = [s for s, v in (("--duzen", a.duzen), ("--sahne", a.sahne), ("--kamera", a.kamera),
                                   ("--pencere", a.pencere), ("--oyun-bolge", a.oyun_bolge),
-                                  ("--oyun", a.oyun), ("--ust-oran", a.ust_oran)) if v]
+                                  ("--oyun", a.oyun), ("--ust-oran", a.ust_oran), ("--maske", a.maske)) if v]
         if catisan:
             sys.exit(f"--guvenli şunlarla birlikte kullanılamaz: {', '.join(catisan)}\nVideo üretilmedi.")
         try:
@@ -177,7 +189,7 @@ def main():
                 f"{ad} {'—' if b[ad] is None else '{},{} {}x{}'.format(*b[ad])} ({k})"
                 for ad, k in kaynaklar.items()))
         filtre, ust, alt = filtre_olustur(b["kamera"], b["pencere"], b["oyun"], araliklar(a.oyun),
-                                          ust_oran)
+                                          ust_oran, bolge(a.maske) if a.maske else None)
     if a.filtre_goster:
         print(filtre.replace(";", ";\n"))
     cikti.parent.mkdir(parents=True, exist_ok=True)

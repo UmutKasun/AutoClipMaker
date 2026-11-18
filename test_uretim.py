@@ -40,6 +40,75 @@ class Kimlik(unittest.TestCase):
         self.assertEqual(u.parca_araligi(100.5, 40, 0), (95, 146, 5.5))
 
 
+MASTER = """#EXTM3U
+#EXT-X-MEDIA:TYPE=VIDEO,GROUP-ID="1080p60",NAME="1080p60",AUTOSELECT=YES,DEFAULT=YES
+#EXT-X-STREAM-INF:PROGRAM-ID=1,BANDWIDTH=7254664,CODECS="avc1.64002A,mp4a.40.2",RESOLUTION=1920x1080,VIDEO="1080p60",FRAME-RATE=60.000
+1080p60/playlist.m3u8
+#EXT-X-STREAM-INF:PROGRAM-ID=1,BANDWIDTH=3565322,CODECS="avc1.4D401F,mp4a.40.2",RESOLUTION=1280x720,VIDEO="720p60",FRAME-RATE=60.000
+720p60/playlist.m3u8
+"""
+MEDYA = """#EXTM3U
+#EXT-X-TARGETDURATION:13
+#EXT-X-PROGRAM-DATE-TIME:2026-11-15T11:00:15.116Z
+#EXTINF:10.583,
+0.ts
+#EXT-X-PROGRAM-DATE-TIME:2026-11-15T11:00:25.699Z
+#EXTINF:10.000,
+1.ts
+#EXT-X-PROGRAM-DATE-TIME:2026-11-15T11:00:35.699Z
+#EXTINF:10.000,
+2.ts
+#EXT-X-ENDLIST
+"""
+M_URL = "https://stream.example/x/media/hls/master.m3u8"
+
+
+class Kick(unittest.TestCase):
+
+    def test_kimlik(self):
+        u7 = "01a1dedd-71e8-726c-b2f9-adc6963cc526"
+        self.assertEqual(u.vod_coz(f"https://kick.com/rraenee/videos/{u7}"), ("kick", u7, "rraenee"))
+        self.assertEqual(u.vod_coz(f"kick.com/RRaenee/video/{u7.upper()}?t=5"), ("kick", u7, "rraenee"))
+        self.assertEqual(u.vod_coz(u7), ("kick", u7, None))
+        self.assertEqual(u.vod_coz("https://www.twitch.tv/videos/2931374918"), ("twitch", "2931374918", None))
+        self.assertEqual(u.vod_id(f"https://kick.com/rraenee/videos/{u7}"), u7)
+
+    def test_uuid7_zamani(self):
+        import sohbet_klip as sk
+        self.assertEqual(sk.uuid7_zamani("01a1dedd-71e8-726c-b2f9-adc6963cc526").isoformat(),
+                         "2026-11-15T11:00:17+00:00")
+        self.assertIsNone(sk.uuid7_zamani("46468a6d-cacd-48a5-a600-92f5c41ea1bf"))   # v4
+
+    def test_varyant(self):
+        self.assertEqual(u.hls_varyant_sec(MASTER, M_URL, "720p60"),
+                         ("https://stream.example/x/media/hls/720p60/playlist.m3u8", "720p60"))
+        self.assertEqual(u.hls_varyant_sec(MASTER, M_URL, "1440p60")[1], "1080p60")   # en yüksek
+        with self.assertRaises(u.AdimHatasi):
+            u.hls_varyant_sec("#EXTM3U\n", M_URL, "1080p60")
+
+    def test_segment_saatle_hizalanir(self):
+        import sohbet_klip as sk
+        segs = u.hls_segmentleri(MEDYA, "https://s/1080p60/playlist.m3u8")
+        self.assertEqual([round(d, 3) for _, d, _ in segs], [10.583, 10.0, 10.0])
+        self.assertEqual(segs[1][2], "https://s/1080p60/1.ts")
+        bas = sk.tarih("2026-11-15T11:00:17+00:00")                 # API başlangıcı: video 1.884 sn önde
+        sec, ofs = u.segment_sec(segs, bas + u.timedelta(seconds=10), bas + u.timedelta(seconds=20))
+        self.assertEqual([x[2][-4:] for x in sec], ["1.ts", "2.ts"])
+        self.assertAlmostEqual(ofs, 1.301, places=3)                # 11:00:27 - 11:00:25.699
+        with self.assertRaises(u.AdimHatasi):                        # liste dışı
+            u.segment_sec(segs, bas + u.timedelta(seconds=25), bas + u.timedelta(seconds=60))
+
+    def test_bosluklu_liste_reddedilir(self):
+        import sohbet_klip as sk
+        bozuk = MEDYA.replace("11:00:35.699", "11:00:39.000")
+        segs = u.hls_segmentleri(bozuk, "https://s/p.m3u8")
+        bas = sk.tarih("2026-11-15T11:00:17+00:00")
+        with self.assertRaises(u.AdimHatasi):
+            u.segment_sec(segs, bas + u.timedelta(seconds=10), bas + u.timedelta(seconds=20))
+        with self.assertRaises(u.AdimHatasi):
+            u.hls_segmentleri("#EXTM3U\n#EXTINF:10,\n0.ts\n", "https://s/p.m3u8")   # saat yok
+
+
 class Dogrulama(unittest.TestCase):
 
     def test_saglam_klip(self):
