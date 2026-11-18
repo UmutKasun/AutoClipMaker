@@ -31,8 +31,11 @@ GEN, YUK = 1080, 1920
 YAZI_TIPI = "Segoe UI Black"
 FONT_KLASORU = "C:/Windows/Fonts"
 BEYAZ, SARI = "&H00FFFFFF", "&H0000FFFF"          # ASS renkleri &HAABBGGRR
-MAX_KELIME, MAX_KARAKTER = 4, 18                   # bir grupta en fazla
+# bir grupta en fazla; 78 px'te ölçüm: 24 karakter ~640 px (en kötü "MMM…" 1022 px),
+# güvenli alan 1000 px. Daha uzun tek kelimeler orantılı küçültülür.
+MAX_KELIME, MAX_KARAKTER = 4, 24
 BOSLUK_KIR = 0.6                                   # bu kadar sn sessizlik yeni grup açar
+ZINCIR = 0.3                                       # bu kadar yakın tek kelimelik ünlemler birleşir
 SON_TUT = 0.3                                      # grup son kelimeden sonra bu kadar kalır
 SUPHELI = 0.60                                     # bu olasılığın altı raporlanır
 
@@ -135,22 +138,121 @@ def gorunen(veri, maske, buyuk):
     return sonuc
 
 
+def cumle_sonu(k):
+    return k["goster"].endswith((".", "?", "!", "…"))
+
+
+def karakter(g):
+    return sum(len(x["goster"]) for x in g) + len(g) - 1
+
+
+def dengeli_bol(ifade):
+    """Bir ifadeyi (cümle / duraklamasız parça) en az sayıda gruba, eşit uzunluklarla böler.
+    Maliyet: (grup sayısı, karakter uzunluklarının kareleri toplamı - virgülden bölme ödülü).
+    4+4+1 yerine 3+3+3; tek kelime sınırı aşsa da tek başına grup olabilir."""
+    n = len(ifade)
+    en_iyi = [None] * (n + 1)
+    en_iyi[0] = (0, 0, 0)
+    for j in range(1, n + 1):
+        for i in range(max(0, j - MAX_KELIME), j):
+            g = ifade[i:j]
+            if en_iyi[i] is None or (len(g) > 1 and karakter(g) > MAX_KARAKTER):
+                continue
+            odul = 40 if j < n and g[-1]["goster"].endswith((",", ";", ":")) else 0
+            aday = (en_iyi[i][0] + 1, en_iyi[i][1] + karakter(g) ** 2 - odul, i)
+            if en_iyi[j] is None or aday[:2] <= en_iyi[j][:2]:      # eşitlikte ilk grup uzun
+                en_iyi[j] = aday
+    parcalar, j = [], n
+    while j > 0:
+        i = en_iyi[j][2]
+        parcalar.insert(0, ifade[i:j])
+        j = i
+    return parcalar
+
+
 def grupla(kelimeler):
-    gruplar, g = [], []
+    # 1. ifadelere ayır: cümle sonu ve >= BOSLUK_KIR sessizlik
+    ifadeler, g = [], []
     for k in kelimeler:
-        if g:
-            bosluk = k["bas"] - g[-1]["son"]
-            karakter = sum(len(x["goster"]) + 1 for x in g) + len(k["goster"])
-            noktalama = g[-1]["goster"].endswith((".", "?", "!", "…"))
-            # cümle sonu her zaman böler; tek kelimelik kısa cümleler ("HADİ.") tek kalır
-            if (len(g) >= MAX_KELIME or bosluk >= BOSLUK_KIR or karakter > MAX_KARAKTER
-                    or noktalama):
-                gruplar.append(g)
-                g = []
+        if g and (k["bas"] - g[-1]["son"] >= BOSLUK_KIR or cumle_sonu(g[-1])):
+            ifadeler.append(g)
+            g = []
         g.append(k)
     if g:
-        gruplar.append(g)
-    return gruplar
+        ifadeler.append(g)
+    # 2. her ifadeyi en fazla 4 kelime / 24 karakterlik dengeli gruplara böl
+    gruplar = [p for ifade in ifadeler for p in dengeli_bol(ifade)]
+    # 3. ünlem zinciri: art arda, birbirine yakın tek kelimelik cümleler aynı satırda
+    #    ("GEÇER. GEÇER. GEÇER."); arası sessiz olan ünlemler ("HADİ.") tek kalır
+    sonuc = []
+    for g in gruplar:
+        if (sonuc and len(g) == 1 and cumle_sonu(g[0]) and all(map(cumle_sonu, sonuc[-1]))
+                and g[0]["bas"] - sonuc[-1][-1]["son"] < ZINCIR
+                and len(sonuc[-1]) < MAX_KELIME and karakter(sonuc[-1] + g) <= MAX_KARAKTER):
+            sonuc[-1].append(g[0])
+        else:
+            sonuc.append(g)
+    return sonuc
+
+
+# --------------------------------------------------------------------------
+# İnceleme listesi (hiçbir kelimeyi kendiliğinden düzeltmez)
+# --------------------------------------------------------------------------
+
+def _yalin(t):
+    return re.sub(r"[^\w]", "", str.lower(t or ""))
+
+
+def inceleme_satirlari(veri, alternatif=None):
+    """Sesle kontrol edilmesi gereken kelimeler: düşük güven, ikinci tanımayla uyuşmazlık,
+    sesle doğrulanmamış elle düzeltme. "dogrulandi": true olanlar listeye girmez."""
+    alt = (alternatif or {}).get("kelimeler", [])
+    satirlar = []
+    for k in veri["kelimeler"]:
+        if k.get("dogrulandi"):
+            continue
+        nedenler, alt_metin = [], ""
+        if alternatif is not None:
+            ortak = [x["metin"] for x in alt if x["bas"] < k["son"] and k["bas"] < x["son"]]
+            alt_metin = " ".join(ortak)
+            if not ortak:
+                nedenler.append("ikinci tanımada yok")
+            elif _yalin(k["metin"]) not in {_yalin(x) for x in ortak}:
+                nedenler.append("ikinci tanımayla uyuşmuyor")
+        if k["olasilik"] < SUPHELI:
+            nedenler.append(f"düşük güven ({k['olasilik']:.2f})")
+        if k["son"] - k["bas"] < 0.05:
+            nedenler.append("zaman damgası şüpheli (süre ~0)")
+        if k.get("duzeltme") is not None:
+            nedenler.append("elle düzeltildi, sesle doğrulanmadı"
+                            + (f" ({k['duzeltme_notu']})" if k.get("duzeltme_notu") else ""))
+        if nedenler:
+            satirlar.append({**k, "alternatif": alt_metin, "nedenler": nedenler})
+    return satirlar
+
+
+def inceleme_yaz(veri, alternatif, yol):
+    s = inceleme_satirlari(veri, alternatif)
+
+    def vad(v):
+        return {True: "açık", False: "kapalı"}.get(v.get("vad"), "bilinmiyor")
+
+    ikinci = f"var (.bak, VAD {vad(alternatif)})" if alternatif else "yok"
+    md = [f"# Altyazı inceleme listesi: {veri['video']}", "",
+          f"Dil: {veri['dil']} · Model: {veri.get('model')} · VAD {vad(veri)} · "
+          f"İkinci tanıma: {ikinci}", "",
+          "Bu kelimeler **sesle doğrulanmadı**. Dinleyip doğruysa JSON'da kelimeye "
+          "`\"dogrulandi\": true` ekleyin; yanlışsa `\"duzeltme\"` yazıp `\"dogrulandi\": true` ekleyin.", "",
+          "| No | Zaman (sn) | Ham metin | Görünen | Güven | İkinci tanıma | Neden |",
+          "|---|---|---|---|---|---|---|"]
+    for k in s:
+        gor = k["metin"] if k.get("duzeltme") is None else k["duzeltme"]
+        md.append(f"| {k['no']} | {k['bas']:.2f}–{k['son']:.2f} | {k['metin']} | {gor or '(gizli)'} | "
+                  f"{k['olasilik']:.2f} | {k['alternatif'] or '—'} | {'; '.join(k['nedenler'])} |")
+    if not s:
+        md.append("| — | | | | | | İncelenecek kelime yok |")
+    yol.write_text("\n".join(md) + "\n", encoding="utf-8")
+    return s
 
 
 def ass_zaman(t):
@@ -251,13 +353,16 @@ def main():
     print()
     for g in gruplar:
         print(f"  [{g[0]['bas']:6.2f}-{g[-1]['son']:6.2f}] " + " ".join(x["goster"] for x in g))
-    supheli = [k for k in veri["kelimeler"] if k["olasilik"] < SUPHELI and k.get("duzeltme") is None]
     duzeltilen = [k for k in veri["kelimeler"] if k.get("duzeltme") is not None]
     maskeli = sum("*" in k["goster"] for k in kel)
-    print(f"\n{len(kel)} kelime, {len(gruplar)} grup, {maskeli} maskeli, {len(duzeltilen)} elle düzeltilmiş")
-    if supheli:
-        print(f"Şüpheli (olasılık < {SUPHELI}): " +
-              ", ".join(f"#{k['no']} {k['metin']} ({k['bas']:.1f} sn, {k['olasilik']:.2f})" for k in supheli))
+    tek = sum(len(g) == 1 for g in gruplar)
+    print(f"\n{len(kel)} kelime, {len(gruplar)} grup ({tek} tek kelimelik), {maskeli} maskeli, "
+          f"{len(duzeltilen)} elle düzeltilmiş")
+    bak = js.with_suffix(".json.bak")
+    alternatif = json.loads(bak.read_text(encoding="utf-8")) if bak.exists() else None
+    inc = kok.with_suffix(".inceleme.md")
+    liste = inceleme_yaz(veri, alternatif, inc)
+    print(f"İnceleme listesi: {inc} ({len(liste)} kelime sesle kontrol edilmeli)")
     if a.sadece_json:
         return
     ass.write_text(ass_olustur(gruplar, a.y, a.boyut), encoding="utf-8-sig")

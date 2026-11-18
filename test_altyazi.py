@@ -56,14 +56,57 @@ class Gruplama(unittest.TestCase):
                 for g in a.grupla(a.gorunen({"dil": "tr", "kelimeler": kel(*w, **kw)}, True, True))]
 
     def test_en_fazla_dort_kelime_ve_karakter_siniri(self):
-        self.assertEqual(self.gr("bak", "çok", "iyi", "bu", "adam"), [["BAK", "ÇOK", "İYİ", "BU"], ["ADAM"]])
-        self.assertTrue(all(sum(len(w) + 1 for w in g) - 1 <= a.MAX_KARAKTER or len(g) == 1
-                            for g in self.gr("güvendiğim", "isimler", "geçti", "diyor")))
+        self.assertEqual(self.gr("bak", "çok", "iyi", "bu", "adam"), [["BAK", "ÇOK", "İYİ"], ["BU", "ADAM"]])
+        uzun = self.gr("güvendiğim", "isimler", "geçti", "diyor", "birazdan", "damlayacağım")
+        self.assertTrue(all(len(g) <= a.MAX_KELIME and
+                            (sum(len(w) + 1 for w in g) - 1 <= a.MAX_KARAKTER or len(g) == 1) for g in uzun))
+
+    def test_dengeli_bolme_yalniz_kuyruk_birakmaz(self):
+        # 9 kelimelik cümle: açgözlü bölme 4+4+1 verirdi; dengeli bölme en az grup (3),
+        # karakter uzunluğunu dengeler ve tek kelimelik kuyruk bırakmaz
+        g = self.gr("bak,", "çok", "güvendiğim", "isimler", "geçti", "diyor", "şu", "anda", "ya.")
+        self.assertEqual(len(g), 3)
+        self.assertTrue(all(len(x) >= 2 for x in g))
+        self.assertEqual(g[-1][-2:], ["ANDA", "YA."])                    # "şu anda" bölünmez
+        self.assertEqual(self.gr("ja,", "das", "ist", "so,", "ne?"), [["JA,", "DAS", "İST"], ["SO,", "NE?"]])
+
+    def test_virgulden_bolmeyi_tercih_eder(self):
+        g = [[x["goster"] for x in gg] for gg in a.grupla(a.gorunen(
+            {"dil": "de", "kelimeler": kel("lass", "es", "lieber", "nein,", "nein,", "nein")}, True, True))]
+        self.assertEqual(g, [["LASS", "ES", "LIEBER"], ["NEIN,", "NEIN,", "NEIN"]])
 
     def test_cumle_sonu_ve_sessizlik_boler(self):
         self.assertEqual(self.gr("sadece", "bakalım.", "oha", "geçti"),
                          [["SADECE", "BAKALIM."], ["OHA", "GEÇTİ"]])
         self.assertEqual(self.gr("hadi", "geçer", aralik=1.0), [["HADİ"], ["GEÇER"]])
+
+    def test_unlem_zinciri_birlesir_yalniz_unlem_korunur(self):
+        self.assertEqual(self.gr("geçer.", "geçer.", "geçer."), [["GEÇER.", "GEÇER.", "GEÇER."]])
+        self.assertEqual(self.gr("hadi.", "çat.", aralik=1.0), [["HADİ."], ["ÇAT."]])
+        self.assertEqual(self.gr("oha!", "geçti!", "cidden", "geçti", "diyor."),
+                         [["OHA!", "GEÇTİ!"], ["CİDDEN", "GEÇTİ", "DİYOR."]])
+
+
+class Inceleme(unittest.TestCase):
+
+    def test_nedenler(self):
+        v = {"kelimeler": kel("Volkan", "sen", "60K", "'li", "olsun")}
+        v["kelimeler"][0]["olasilik"] = 0.54
+        v["kelimeler"][3]["duzeltme"] = "hayırlı"
+        v["kelimeler"][4]["son"] = v["kelimeler"][4]["bas"]          # sıfır süre
+        alt = {"kelimeler": [dict(k) for k in kel("Lohkan", "sen", "60K")]}
+        s = {k["no"]: k["nedenler"] for k in a.inceleme_satirlari(v, alt)}
+        self.assertIn("ikinci tanımayla uyuşmuyor", s[1])
+        self.assertTrue(any("düşük güven" in n for n in s[1]))
+        self.assertNotIn(2, s)                                           # uyuşuyor, güven yüksek
+        self.assertTrue(any("elle düzeltildi" in n for n in s[4]))
+        self.assertIn("ikinci tanımada yok", s[5])
+        self.assertIn("zaman damgası şüpheli (süre ~0)", s[5])
+
+    def test_dogrulanan_listeye_girmez(self):
+        v = {"kelimeler": kel("Volkan")}
+        v["kelimeler"][0].update(olasilik=0.2, dogrulandi=True)
+        self.assertEqual(a.inceleme_satirlari(v, None), [])
 
 
 class Ass(unittest.TestCase):
