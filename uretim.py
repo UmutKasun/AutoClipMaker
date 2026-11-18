@@ -1085,8 +1085,15 @@ def klip_uret(k, aday, a):
             uyarilar.append(f"yüz kontrolü çalışmadı ({e})")
         klip["ust_yuz_orani"] = oran
         if oran is not None and oran < UST_YUZ_MIN:
-            uyarilar.append(f"kadraj: bitmiş videonun kamera bölümünde yüz karelerin yalnız %{100 * oran:.0f}'inde "
-                            "görünüyor; kırpım yanlış yere oturmuş olabilir")
+            # yanlış kırpım çıktıya girmesin: bu klip tam görüntüyle yeniden üretilir (kalıcı seçim)
+            print(f"    kadraj  : kamera bölümünde yüz karelerin yalnız %{100 * oran:.0f}'inde; "
+                  "tam görüntüyle yeniden üretiliyor")
+            k.setdefault("yerlesim_secimi", {})[kok] = "guvenli"
+            klip["kadraj_geri_donus"] = (f"otomatik kırpımda kamera bölümünde yüz yalnız %{100 * oran:.0f}; "
+                                         "tam görüntüye dönüldü")
+            return klip_uret(k, aday, a)
+    if yer["tur"] == "guvenli" and klip.get("kadraj_geri_donus"):
+        uyarilar.append(f"kadraj: {klip['kadraj_geri_donus']}")
     kontrol, iyi = otomatik_kontrol(klip["zaman"], yer, ses, n_kelime, n_incele, uyarilar)
     klip["kontrol"] = kontrol
     klip["kalite_tahmini"] = "iyi" if iyi else "incele: " + ", ".join(kontrol["sorun"])
