@@ -1,0 +1,51 @@
+{
+  "aciklama": "Klip adayı etiketleri. Zamanlar yayın başından itibaren SS:DD:ss, aralık [bas, son). durum: basarili | basarisiz. dogrulama: video (kaynak video karesi/sesi incelendi, kesin) | sohbet (yalnız sohbet okundu, ön etiket; raporda BELİRSİZ sayılır).",
+  "yayinlar": [
+    {
+      "id": "2930392468",
+      "yayinci": "Se7en",
+      "sohbet": "chat.json",
+      "emoteler": "chat-emotes.json",
+      "incelenen_video": [["03:19:40", "03:21:05"], ["03:49:25", "03:50:55"]],
+      "etiketler": [
+        {"bas": "03:20:00", "son": "03:21:00", "durum": "basarili", "dogrulama": "video",
+         "not": "Item yükseltme tuttu; animasyon 03:20:30, ana sohbet dalgası 03:20:28-33"},
+        {"bas": "03:49:45", "son": "03:50:45", "durum": "basarili", "dogrulama": "video",
+         "not": "Arka arkaya iki yükseltme başarısı (~03:49:52 ve ~03:50:17)"},
+        {"bas": "03:39:00", "son": "03:39:30", "durum": "basarili", "dogrulama": "sohbet",
+         "not": "Küçük GEÇTİ dalgası (11 kişi); video incelenmedi"},
+        {"bas": "03:46:15", "son": "03:46:45", "durum": "basarili", "dogrulama": "sohbet",
+         "not": "Küçük GEÇTİ dalgası (11 kişi); video incelenmedi"},
+        {"bas": "03:57:00", "son": "03:57:15", "durum": "basarisiz", "dogrulama": "sohbet",
+         "not": "2 kişinin ÖMER ABİ spamı; arkada gerçek bit bağışı olabilir"},
+        {"bas": "01:23:45", "son": "01:24:00", "durum": "basarisiz", "dogrulama": "sohbet",
+         "not": "5 kişi, mesajların çoğu tek kullanıcıdan"},
+        {"bas": "03:25:15", "son": "03:26:00", "durum": "basarisiz", "dogrulama": "sohbet",
+         "not": "Hediye abonelik sonrası teşekkür zinciri; klip değeri düşük"}
+      ]
+    },
+    {
+      "id": "2931374918",
+      "yayinci": "SCHRADIN",
+      "sohbet": "yayinlar/2931374918/chat.json",
+      "emoteler": "yayinlar/2931374918/chat-emotes.json",
+      "incelenen_video": [["01:34:15", "01:35:45"]],
+      "etiketler": [
+        {"bas": "01:34:45", "son": "01:35:30", "durum": "basarili", "dogrulama": "video",
+         "not": "Paraşüt açılmadan çakılma; atlayış 01:34:55, çakılma 01:34:58"},
+        {"bas": "00:36:30", "son": "00:37:15", "durum": "basarili", "dogrulama": "sohbet",
+         "not": "Kahkaha (46 kişi); reaksiyon bölümü, içerik başka bir üreticiye ait olabilir"},
+        {"bas": "01:58:45", "son": "01:59:30", "durum": "basarili", "dogrulama": "sohbet",
+         "not": "Kötü sürüş kahkahası (32 kişi)"},
+        {"bas": "02:45:30", "son": "02:46:15", "durum": "basarili", "dogrulama": "sohbet",
+         "not": "47 mesajın 28'i kahkaha"},
+        {"bas": "00:06:30", "son": "00:08:00", "durum": "basarisiz", "dogrulama": "sohbet",
+         "not": "Mikrofon kapalı: 'Mikro ist aus' spamı ve selamlaşma emote'ları"},
+        {"bas": "00:12:00", "son": "00:14:45", "durum": "basarisiz", "dogrulama": "sohbet",
+         "not": "Soru-cevap: kontrol tuşları"},
+        {"bas": "00:44:00", "son": "00:45:00", "durum": "basarisiz", "dogrulama": "sohbet",
+         "not": "Soru-cevap: kimi arasın önerileri"}
+      ]
+    }
+  ]
+}
