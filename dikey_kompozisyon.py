@@ -9,12 +9,17 @@ bulanık/karartılmış kopyasıyla doldurulur. Yalnız standart kütüphane ve 
 Örnek:
     python dikey_kompozisyon.py kaynak/parca.mp4 --bas 25 --sure 40 \
         --oyun 26.05-40 -o klipler/dikey/klip.mp4
+    python dikey_kompozisyon.py kaynak/parca.mp4 --duzen se7en --oyun 26.05-40 -o klip.mp4
+
+Bölge önceliği: komut satırı (--kamera ...) > --duzen profili > yerleşik varsayılan.
 """
 
 import argparse
 import subprocess
 import sys
 from pathlib import Path
+
+from duzen import profil
 
 GEN, YUK, FPS = 1080, 1920, 60
 
@@ -75,9 +80,49 @@ def filtre_olustur(kamera, pencere, oyun, oyun_araliklari, ust_oran):
     return ";".join(parcalar), ust, alt
 
 
+def kaynak_cozunurluk(yol):
+    try:
+        cikti = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
+                                "stream=width,height", "-of", "csv=p=0", str(yol)],
+                               capture_output=True, text=True, check=True).stdout
+        gen, yuk = (int(v) for v in cikti.strip().split(",")[:2])
+    except (OSError, subprocess.CalledProcessError, ValueError) as e:
+        raise profil.ProfilHatasi(f"kaynak çözünürlüğü okunamadı ({yol}): {e}") from None
+    return gen, yuk
+
+
+def yerlesimi_belirle(a, cozunurluk):
+    """-> (bölgeler {kamera, pencere, oyun}, ust_oran, kaynaklar ya da None).
+    --duzen yoksa eski davranış: CLI ya da yerleşik varsayılan, çözünürlük sorulmaz."""
+    cli = {"kamera": a.kamera, "pencere": a.pencere, "oyun": a.oyun_bolge}
+    if not a.duzen:
+        if a.sahne:
+            raise profil.ProfilHatasi("--sahne yalnız --duzen ile kullanılabilir")
+        varsayilan = {"kamera": KAMERA, "pencere": PENCERE, "oyun": OYUN}
+        return ({ad: bolge(cli[ad] or varsayilan[ad]) for ad in cli},
+                0.34 if a.ust_oran is None else a.ust_oran, None)
+    gen, yuk = cozunurluk()
+    y = profil.yerlesim(profil.yukle(a.duzen), a.sahne, gen, yuk)
+    b, kaynak = {}, {}
+    for ad in cli:
+        if cli[ad]:
+            b[ad] = profil.kare_icinde(bolge(cli[ad]), gen, yuk,
+                                       f"--{'oyun-bolge' if ad == 'oyun' else ad}")
+            kaynak[ad] = "komut satırı"
+        elif ad in y:
+            b[ad], kaynak[ad] = y[ad], "profil"
+        elif a.oyun:
+            raise profil.ProfilHatasi(f"--oyun aralıkları verildi ama profilde '{ad}' bölgesi yok; "
+                                      "--oyun-bolge ile verin")
+        else:
+            b[ad], kaynak[ad] = None, "yok"
+    return b, (y["ust_oran"] if a.ust_oran is None else a.ust_oran), kaynak
+
+
 def main():
     try:
         sys.stdout.reconfigure(encoding="utf-8")
+        sys.stderr.reconfigure(encoding="utf-8")
     except Exception:
         pass
     ap = argparse.ArgumentParser(description="Kamera üstte, Upgrade penceresi altta dikey video.")
@@ -87,10 +132,12 @@ def main():
     ap.add_argument("--sure", type=float, default=40, help="süre, sn (40)")
     ap.add_argument("--oyun", default="", help="alt bölümün oyuna geçtiği aralıklar, "
                     "klibe göre sn: '26.05-40' ya da '10-12,30-40'")
-    ap.add_argument("--kamera", default=KAMERA, help=f"x1,y1,x2,y2 ({KAMERA})")
-    ap.add_argument("--pencere", default=PENCERE, help=f"x1,y1,x2,y2 ({PENCERE})")
-    ap.add_argument("--oyun-bolge", default=OYUN, help=f"x1,y1,x2,y2 ({OYUN})")
-    ap.add_argument("--ust-oran", type=float, default=0.34, help="üst bölüm oranı (0.34)")
+    ap.add_argument("--duzen", help="yayıncı profili: duzenler/<ad>.json adı (se7en) ya da dosya yolu")
+    ap.add_argument("--sahne", help="profildeki sahne (varsayılan: profilin varsayilan_sahne)")
+    ap.add_argument("--kamera", help=f"x1,y1,x2,y2 kaynak pikseli; profili geçersiz kılar ({KAMERA})")
+    ap.add_argument("--pencere", help=f"x1,y1,x2,y2 kaynak pikseli; profili geçersiz kılar ({PENCERE})")
+    ap.add_argument("--oyun-bolge", help=f"x1,y1,x2,y2 kaynak pikseli; profili geçersiz kılar ({OYUN})")
+    ap.add_argument("--ust-oran", type=float, help="üst bölüm oranı (profil ya da 0.34)")
     ap.add_argument("--filtre-goster", action="store_true", help="filter_complex'i yazdır")
     a = ap.parse_args()
 
@@ -99,8 +146,15 @@ def main():
     cikti = Path(a.cikti)
     if cikti.resolve() == Path(a.kaynak).resolve():
         sys.exit("Çıktı kaynakla aynı olamaz.")
-    filtre, ust, alt = filtre_olustur(bolge(a.kamera), bolge(a.pencere), bolge(a.oyun_bolge),
-                                      araliklar(a.oyun), a.ust_oran)
+    try:
+        b, ust_oran, kaynaklar = yerlesimi_belirle(a, lambda: kaynak_cozunurluk(a.kaynak))
+    except profil.ProfilHatasi as e:
+        sys.exit(f"Düzen hatası: {e}\nVideo üretilmedi.")
+    if kaynaklar:
+        print(f"Düzen: {a.duzen} / sahne {a.sahne or 'varsayılan'}: " + "; ".join(
+            f"{ad} {'—' if b[ad] is None else '{},{} {}x{}'.format(*b[ad])} ({k})"
+            for ad, k in kaynaklar.items()))
+    filtre, ust, alt = filtre_olustur(b["kamera"], b["pencere"], b["oyun"], araliklar(a.oyun), ust_oran)
     if a.filtre_goster:
         print(filtre.replace(";", ";\n"))
     cikti.parent.mkdir(parents=True, exist_ok=True)

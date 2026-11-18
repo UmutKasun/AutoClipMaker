@@ -1,0 +1,30 @@
+{
+  "surum": 1,
+  "yayinci": "SCHRADIN",
+  "aciklama": "GTA yayını: kamera sol üstte siyah kenarlı, mini harita sol altta, oyun tam ekran.",
+  "referans_cozunurluk": [1920, 1080],
+  "varsayilan_sahne": "oyun",
+  "sahneler": {
+    "oyun": {
+      "tur": "oyun",
+      "aciklama": "Üstte kamera; alt bölüm sürekli oyun görüntüsü (pencere bölgesi). Ayrı oyun bölgesi yok.",
+      "ust_oran": 0.34,
+      "bolgeler": {
+        "kamera": {
+          "kutu": [0.0, 0.0, 0.28125, 0.27963],
+          "kaynak": "elle",
+          "dogrulandi": true,
+          "aciklama": "1080p: 0,0,540,302",
+          "dogrulama_notu": "013500-FALLSCHIRM dikey klibiyle görsel doğrulandı (2026-11-18)"
+        },
+        "pencere": {
+          "kutu": [0.28125, 0.0, 0.760417, 1.0],
+          "kaynak": "elle",
+          "dogrulandi": true,
+          "aciklama": "1080p: 540,0,1460,1080; oyun görüntüsü, kamera ve mini harita dışarıda",
+          "dogrulama_notu": "013500-FALLSCHIRM dikey klibiyle görsel doğrulandı (2026-11-18)"
+        }
+      }
+    }
+  }
+}

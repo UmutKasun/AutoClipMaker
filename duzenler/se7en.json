@@ -1,0 +1,37 @@
+{
+  "surum": 1,
+  "yayinci": "Se7en",
+  "aciklama": "Item Upgrade yayını: kamera sağ altta çerçeveli, sohbet katmanı solda, Upgrade penceresi sağ üstte.",
+  "referans_cozunurluk": [1920, 1080],
+  "varsayilan_sahne": "oyun",
+  "sahneler": {
+    "oyun": {
+      "tur": "oyun",
+      "aciklama": "Üstte kamera; altta Upgrade penceresi, --oyun aralıklarında oyun görüntüsü.",
+      "ust_oran": 0.34,
+      "bolgeler": {
+        "kamera": {
+          "kutu": [0.504167, 0.705556, 0.75625, 0.962963],
+          "kaynak": "elle",
+          "dogrulandi": true,
+          "aciklama": "1080p: 968,762,1452,1040",
+          "dogrulama_notu": "032030 ve 035015 dikey klipleriyle görsel doğrulandı (2026-11-18)"
+        },
+        "pencere": {
+          "kutu": [0.768229, 0.0, 0.989583, 0.685185],
+          "kaynak": "elle",
+          "dogrulandi": true,
+          "aciklama": "1080p: 1475,0,1900,740 (Item Upgrade penceresi)",
+          "dogrulama_notu": "032030 ve 035015 dikey klipleriyle görsel doğrulandı (2026-11-18)"
+        },
+        "oyun": {
+          "kutu": [0.33125, 0.0, 0.66875, 0.703704],
+          "kaynak": "elle",
+          "dogrulandi": true,
+          "aciklama": "1080p: 636,0,1284,760; karakter ortada, kamera (y>=762) ve sohbet katmanı dışarıda",
+          "dogrulama_notu": "032030 ve 035015 dikey klipleriyle görsel doğrulandı (2026-11-18)"
+        }
+      }
+    }
+  }
+}
