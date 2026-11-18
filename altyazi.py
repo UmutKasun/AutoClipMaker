@@ -38,6 +38,19 @@ BOSLUK_KIR = 0.6                                   # bu kadar sn sessizlik yeni 
 ZINCIR = 0.3                                       # bu kadar yakın tek kelimelik ünlemler birleşir
 SON_TUT = 0.3                                      # grup son kelimeden sonra bu kadar kalır
 SUPHELI = 0.60                                     # bu olasılığın altı raporlanır
+SICAKLIK = (0.0, 0.2, 0.4)                         # Whisper yeniden deneme sıcaklıkları (rastgelelik sınırlı)
+TANIMA_SURUMU = 4                                  # 2: sınırlı sıcaklık + tohum + uydurma süzgeci; 3: kalıplar; 4: VAD yedeği
+VAD_YEDEK_KELIME = 10                              # bundan az kelime çıkarsa VAD açık bir kez daha tanınır
+# Whisper'ın eğitim verisindeki altyazı imzaları: konuşma yokken üretilir, gerçek konuşma olamaz
+UYDURMA_CUMLE = re.compile(r"altyaz[ıi]\s*:?\s*m\s*\.?\s*k\b|izlediğiniz için teşekkür|izlediginiz icin tesekkur"
+                           r"|amara\.org|subtitles? (?:by|created by)|transcri(?:bed|pt|ption) by"
+                           r"|untertitel (?:im auftrag|von|der amara)", re.I)
+# YouTube kapanış kalıpları: yayıncı da söyleyebilir, atılmaz ama inceleme listesine girer
+YOUTUBE_KALIP = re.compile(r"abone ol|abone değil|like butonu|beğenmeyi unutma|bildirimleri aç|subscribe"
+                           r"|thanks? (?:you )?for watching|hit (?:that|the) (?:like|bell)|see you (?:in the )?next (?:video|time)"
+                           r"|^\s*(?:thank you|you)\.?\s*$", re.I)    # sessizlikte tek başına "Thank you." sık uydurma
+UYDURMA_LOGPROB = -1.2                            # bölüm ortalaması bunun altındaysa atılır
+LATIN_DISI = re.compile(r"[^\W\d_a-zA-ZÀ-ɏ]")      # tr/de/en için Latin dışı harf (Kiril, Arap…)
 
 # Görünen altyazıda maskelenecek ağır küfürler (normalize küçük harf, önek)
 AGIR_KUFUR = ("amk", "amq", "amına", "amina", "amın", "amcık", "amcik", "orosp", "yarra",
@@ -82,30 +95,62 @@ def model_yukle(ad, cihaz):
     sys.exit("Model yüklenemedi.")
 
 
+def uydurma_kelime(metin):
+    """Whisper uydurması: Latin dışı harf ya da uzun hece döngüsü ("MÖMÖMÖ…"); "ahahah", "Ooooo" kalır."""
+    return bool(LATIN_DISI.search(metin)) or (len(metin) > 12 and bool(re.search(r"(\w{1,3})\1{3,}", metin)))
+
+
 def tani(video, dil, model_adi, cihaz, vad=False):
     t0 = time.time()
     model, cihaz = model_yukle(model_adi, cihaz)
     ses = ses_oku(video)
+    kelimeler, atlanan = _tani(model, ses, dil, vad)
+    yedek = None
+    if not vad and len(kelimeler) < VAD_YEDEK_KELIME:
+        # Müzik altında konuşma: VAD'sız Whisper bölümün tamamını "Altyazı M.K." diye uydurabiliyor
+        # (Eray 00:15: 0 kelime); VAD konuşma parçalarını ayırınca gerçek metin çıkıyor (22 kelime).
+        k2, a2 = _tani(model, ses, dil, True)
+        print(f"  Az kelime ({len(kelimeler)}); VAD açık yeniden tanıma: {len(k2)} kelime")
+        if len(k2) > len(kelimeler):
+            kelimeler, atlanan, vad, yedek = k2, a2, True, "az kelime: VAD açık yeniden tanındı"
+    print(f"Tanıma: {model_adi} / {cihaz}, VAD {'açık' if vad else 'kapalı'}, "
+          f"{len(ses) / 16000:.1f} sn ses, {time.time() - t0:.1f} sn sürdü, {len(kelimeler)} kelime"
+          f"{f', {atlanan} sessiz segment atlandı' if atlanan else ''}")
+    return {"video": Path(video).name, "dil": dil, "model": model_adi, "cihaz": cihaz, "vad": vad,
+            "tanima_surumu": TANIMA_SURUMU, **({"yedek_tanima": yedek} if yedek else {}),
+            "olusturma": datetime.now().isoformat(timespec="seconds"),
+            "nasil_duzeltilir": NASIL, "kelimeler": kelimeler}
+
+
+def _tani(model, ses, dil, vad):
     # VAD varsayılan kapalı: iki gerçek klipte oyun sesi altındaki konuşmayı kesti
+    # Varsayılan yeniden deneme 1.0 sıcaklığa kadar rastgele örnekliyordu: her çalıştırma farklı,
+    # kimi zaman başka dilde uydurma metin (Eray 04:10: "także", "полож"). Sıcaklık 0 tek başına
+    # da bağırışta "MÖMÖMÖ…" döngüsüne giriyor. Ilımlı sıcaklıklar + sabit tohum = tekrarlanabilir.
+    import ctranslate2
+    ctranslate2.set_random_seed(0)
     segler, _ = model.transcribe(ses, language=dil, word_timestamps=True, vad_filter=vad,
-                                 condition_on_previous_text=False, beam_size=5)
+                                 condition_on_previous_text=False, beam_size=5,
+                                 temperature=SICAKLIK)
     kelimeler, atlanan = [], 0
     for s in segler:
         if s.no_speech_prob > 0.6 and s.avg_logprob < -0.8:     # sessizlikte uydurma koruması
             atlanan += 1
             continue
+        if s.avg_logprob < UYDURMA_LOGPROB or UYDURMA_CUMLE.search(s.text):
+            atlanan += 1                                         # emin değil / eğitim verisi kalıbı
+            continue
+        kalip = bool(YOUTUBE_KALIP.search(s.text))               # gerçek de olabilir: inceleme listesine
         for w in s.words or []:
             metin = w.word.strip()
+            if metin and uydurma_kelime(metin):
+                continue
             if metin:
                 kelimeler.append({"no": len(kelimeler) + 1, "metin": metin,
                                   "bas": round(w.start, 2), "son": round(w.end, 2),
-                                  "olasilik": round(w.probability, 2), "duzeltme": None})
-    print(f"Tanıma: {model_adi} / {cihaz}, VAD {'açık' if vad else 'kapalı'}, "
-          f"{len(ses) / 16000:.1f} sn ses, {time.time() - t0:.1f} sn sürdü, {len(kelimeler)} kelime"
-          f"{f', {atlanan} sessiz segment atlandı' if atlanan else ''}")
-    return {"video": Path(video).name, "dil": dil, "model": model_adi, "cihaz": cihaz, "vad": vad,
-            "olusturma": datetime.now().isoformat(timespec="seconds"),
-            "nasil_duzeltilir": NASIL, "kelimeler": kelimeler}
+                                  "olasilik": round(w.probability, 2), "duzeltme": None,
+                                  **({"kalip": True} if kalip else {})})
+    return kelimeler, atlanan
 
 
 # --------------------------------------------------------------------------
@@ -223,12 +268,78 @@ def inceleme_satirlari(veri, alternatif=None):
             nedenler.append(f"düşük güven ({k['olasilik']:.2f})")
         if k["son"] - k["bas"] < 0.05:
             nedenler.append("zaman damgası şüpheli (süre ~0)")
+        if k.get("kalip"):
+            nedenler.append("olası Whisper uydurması (YouTube kapanış kalıbı); dinleyin")
         if k.get("duzeltme") is not None:
             nedenler.append("elle düzeltildi, sesle doğrulanmadı"
                             + (f" ({k['duzeltme_notu']})" if k.get("duzeltme_notu") else ""))
         if nedenler:
             satirlar.append({**k, "alternatif": alt_metin, "nedenler": nedenler})
     return satirlar
+
+
+# --------------------------------------------------------------------------
+# Düz metin düzeltme: videodaki her altyazı satırı bir satır (JSON düzenlemeden)
+# --------------------------------------------------------------------------
+
+DUZ_SATIR = re.compile(r"^\[(\d+)\]\s+[\d:.]+\s+(!?)\s*\|\s?(.*)$")
+
+
+def duz_imza(veri):
+    """Kelime kaydının özeti: düz metin dosyası eski bir kayda uygulanmasın."""
+    import hashlib
+    return hashlib.sha1(json.dumps(veri["kelimeler"], ensure_ascii=False, sort_keys=True)
+                        .encode("utf-8")).hexdigest()[:8]
+
+
+def duz_satirlar(veri, alternatif=None):
+    """[(sıra, başlangıç sn, şüpheli mi, görünen metin)] - videoda görünen gruplarla aynı."""
+    supheli = {k["no"] for k in inceleme_satirlari(veri, alternatif)}
+    gruplar = grupla(gorunen(veri, True, True))
+    return [(i, g[0]["bas"], any(x["no"] in supheli for x in g), " ".join(x["goster"] for x in g))
+            for i, g in enumerate(gruplar, 1)]
+
+
+def duz_uygula(veri, duzenlenen, alternatif=None):
+    """duzenlenen: {sıra: (işaret kaldı mı, yeni metin)}. Değişen satır: kelime sayısı aynıysa
+    kelime kelime, değilse ilk kelimeye tüm satır (diğerleri gizlenir); boş satır gizlenir.
+    Kullanıcının değiştirdiği ya da '!' işaretini kaldırdığı satır 'dogrulandi' olur (elle onay).
+    Döner: değişen satır sayısı."""
+    ust = tr_upper if veri["dil"] == "tr" else str.upper
+    supheli = {k["no"] for k in inceleme_satirlari(veri, alternatif)}
+    no = {k["no"]: k for k in veri["kelimeler"]}
+    degisen = 0
+    for i, g in enumerate(grupla(gorunen(veri, True, True)), 1):
+        if i not in duzenlenen:
+            continue
+        isaret, yeni = duzenlenen[i]
+        yeni = " ".join(yeni.split())
+        eski = " ".join(x["goster"] for x in g)
+        kel = [no[x["no"]] for x in g]
+        if ust(yeni) == eski:
+            if not isaret and any(x["no"] in supheli for x in g):
+                for k in kel:
+                    k["dogrulandi"] = True
+                degisen += 1
+            continue
+        parca = yeni.split()
+        if len(parca) == len(g):
+            for k, x, t in zip(kel, g, parca):
+                if ust(t) != x["goster"]:
+                    k["duzeltme"] = t
+        else:                                     # kelime sayısı değişti: zamanlara sırayla dağıt
+            son = len(kel) - 1
+            for j, k in enumerate(kel):
+                if j < son:
+                    k["duzeltme"] = parca[j] if j < len(parca) else ""
+                else:
+                    k["duzeltme"] = " ".join(parca[son:])
+            if parca:
+                kel[0]["duzeltme_notu"] = "satır olarak düzeltildi; vurgu zamanı yaklaşık"
+        for k in kel:
+            k["dogrulandi"] = True
+        degisen += 1
+    return degisen
 
 
 def inceleme_yaz(veri, alternatif, yol):
@@ -336,13 +447,23 @@ def main():
     if cikti.resolve() == video.resolve():
         sys.exit("Çıktı kaynak videoyla aynı olamaz.")
 
-    if js.exists() and not a.yeniden_tani:
-        veri = json.loads(js.read_text(encoding="utf-8"))
+    veri = json.loads(js.read_text(encoding="utf-8")) if js.exists() else None
+    eski_surum = veri is not None and veri.get("tanima_surumu", 1) < TANIMA_SURUMU
+    elle = veri is not None and any(k.get("duzeltme") is not None or k.get("dogrulandi")
+                                    for k in veri["kelimeler"])
+    if veri is not None and not a.yeniden_tani and not (eski_surum and not elle):
         print(f"Transkripsiyon JSON'dan: {js} ({len(veri['kelimeler'])} kelime)")
+        if eski_surum:
+            print("  Uyarı: JSON eski tanıma sürümüyle üretilmiş ama elle düzeltme içeriyor; korunuyor")
         if veri.get("dil") != a.dil:
             print(f"  Uyarı: JSON dili {veri.get('dil')}, --dil {a.dil}")
     else:
-        if js.exists():
+        if js.exists() and eski_surum and not a.yeniden_tani:
+            # eski sürümün uydurma tanıması karşılaştırma (.bak) olmasın: eski/ altında tarihli saklanır
+            print("  Eski tanıma sürümü (rastgele yeniden deneme); yeniden tanınıyor")
+            (js.parent / "eski").mkdir(exist_ok=True)
+            js.replace(js.parent / "eski" / f"{js.stem}.{datetime.now():%Y%m%d-%H%M%S}.json")
+        elif js.exists():
             js.replace(js.with_suffix(".json.bak"))
         veri = tani(video, a.dil, a.model, a.cihaz, a.vad)
         js.write_text(json.dumps(veri, ensure_ascii=False, indent=1), encoding="utf-8")

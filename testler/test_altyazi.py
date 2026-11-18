@@ -49,6 +49,42 @@ class Duzeltme(unittest.TestCase):
         self.assertEqual([x["goster"] for x in de], ["IST", "STRASSE"])
 
 
+class DuzMetin(unittest.TestCase):
+    """ALTYAZI DÜZELT.txt: satır düzeltme, silme, kelime sayısı değişimi, '!' onayı."""
+
+    def veri(self):
+        k = kel("bir.", "iki", "uc.", "dort", "bes.")               # cümle sonları satırı böler
+        k[0]["olasilik"] = 0.2                                       # şüpheli
+        return {"dil": "tr", "kelimeler": k}
+
+    def test_satirlar_videodaki_gruplarla_ayni(self):
+        s = a.duz_satirlar(self.veri())
+        self.assertEqual([x[3] for x in s], ["BİR.", "İKİ UC.", "DORT BES."])
+        self.assertTrue(s[0][2])
+        self.assertFalse(s[1][2])
+
+    def test_uygula(self):
+        v = self.veri()
+        n = a.duz_uygula(v, {1: (False, "BİR."), 2: (False, "iki üç."), 3: (False, "")})
+        self.assertEqual(n, 3)
+        self.assertEqual([x[3] for x in a.duz_satirlar(v)], ["BİR.", "İKİ ÜÇ."])
+        self.assertEqual(v["kelimeler"][2]["metin"], "uc.")              # ham metin korunur
+        self.assertEqual(v["kelimeler"][2]["duzeltme"], "üç.")
+        self.assertIsNone(v["kelimeler"][1]["duzeltme"])                 # değişmeyen kelimeye dokunulmaz
+        self.assertTrue(v["kelimeler"][0]["dogrulandi"])                 # '!' kaldırıldı = elle onay
+
+    def test_kelime_sayisi_degisince_zamanlara_dagitilir(self):
+        v = self.veri()
+        a.duz_uygula(v, {3: (False, "dört beş altı yedi")})
+        self.assertEqual([x[3] for x in a.duz_satirlar(v)][-1], "DÖRT BEŞ ALTI YEDİ")
+        self.assertEqual(v["kelimeler"][3]["duzeltme"], "dört")
+
+    def test_isaret_kalirsa_ve_metin_ayniysa_degisiklik_yok(self):
+        v = self.veri()
+        self.assertEqual(a.duz_uygula(v, {1: (True, "BİR."), 2: (False, "İKİ UC.")}), 0)
+        self.assertFalse(any(k.get("dogrulandi") for k in v["kelimeler"]))
+
+
 class Gruplama(unittest.TestCase):
 
     def gr(self, *w, **kw):

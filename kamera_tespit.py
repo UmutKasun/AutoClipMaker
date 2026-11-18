@@ -25,6 +25,11 @@ MODEL = Path(__file__).resolve().parent / "modeller" / "face_detection_yunet_202
 KARE = 16                      # örneklenen kare
 YUZ_ESIK = 0.75                # YuNet güveni
 KUME_ORAN = 0.6                # yüz karelerin en az bu oranında aynı yerde olmalı
+KESIK_YUK, KESIK_ORAN, KESIK_UST = 2.7, 1.6, 0.8   # çerçevesiz kamera: yükseklik = 2.7 yüz, üstte 0.8 yüz pay
+KESIK_ALT, KESIK_YAN = 0.55, 0.30                  # çerçevesiz kamera yüzü: alt %45'te ya da yan %30'larda
+GOVDE_GEN = 2.8                                    # gövde maskesi genişliği, yüz genişliği katı
+ORAN_PAY = 0.08               # kamera kutusu 16:9'dan bu oranda uzunsa fazlası kırpılır
+AKTAR_ORAN = 0.4              # ölçü aktarımında tek yüz kümesinin en az kare oranı (birleşik KUME_ORAN)
 TAM_KAMERA_YUZ = 0.30          # yüz yüksekliği / kare yüksekliği bunu aşarsa tam kamera sahnesi
 KENAR_DOLULUK = 0.75           # kamera kenarı, yüz boyunca bu oranda kalıcı olmalı
 KENAR_MIN = 8.0                # o oranda ortalama |gradyan| en az bu kadar
@@ -32,7 +37,8 @@ KENAR_TEPE = 3.0               # kenar, iki yanından en az birinin bu katı kes
 DURAGAN = 6.0                  # zamansal std bunun altındaysa bölge durağan (kamera arka planı)
 OYUN_ORAN = 1.2                # alt bölüme giden oyun kırpımının en/boy oranı (varsayılan)
 UST_MIN, UST_MAX = 0.26, 0.40  # kamera bölümünün dikey videodaki payı
-BANT = 150                     # oyunun üstünde/altında altyazı şeridi, px
+BANT = 150                     # oyunun üstündeki altyazı şeridi, px
+ALT_ARAYUZ = 300               # alttan bu kadar px Shorts arayüzü (başlık, kanal adı) kaplar
 
 
 def kareleri_oku(video, bas=0.0, sure=None, n=KARE):
@@ -149,17 +155,122 @@ def kamera_kutusu(kareler, yuz):
     return (x1, y1, x2, y2), sinir, esik, degisim
 
 
-def tespit(video, bas=0.0, sure=None, n=KARE):
+def oran_yasla(kareler, x1, y1, x2, y2, yuz):
+    """Kamera kutusu 16:9'dan biraz (en fazla ORAN_PAY) uzunsa, bitişik bir sohbet/etiket satırı
+    kutuya katılmıştır (Eray: 450x268, gerçek 450x253). Fazlalık, yeni sınırında daha keskin
+    yatay kenar olan taraftan kırpılır. Döner: (y1, y2, açıklama ya da None)."""
+    kw, kh = x2 - x1, y2 - y1
+    fazla = round(kh - kw * 9 / 16)
+    if fazla <= 2 or fazla > ORAN_PAY * kh:
+        return y1, y2, None
+    _, ey, _ = kenar_haritalari(kareler)
+
+    def keskin(y):
+        return max(float(ey[r, x1:x2].mean()) for r in range(max(0, y - 2), min(ey.shape[0], y + 2)))
+
+    ust, alt = (y1 + fazla, y2), (y1, y2 - fazla)
+    secim, taraf = (ust, "üstten") if keskin(ust[0]) > keskin(alt[1]) else (alt, "alttan")
+    if not (secim[0] <= yuz[1] and yuz[1] + yuz[3] <= secim[1]):
+        return y1, y2, None
+    return secim[0], secim[1], f"16:9'a yaslandı ({taraf} {fazla} px)"
+
+
+def cercevesiz(kareler, kumeler, rapor, neden):
+    """Arka planı kaldırılmış (çerçevesiz) kamera: kenar yok, yayıncı doğrudan oyunun üstünde.
+    Kamera kutusu yüzden kurulur (baş + omuz, KESIK_ORAN en/boy); oyun kırpımında yalnız gövde
+    bölgesi maskelenir. Yalnız kenara/alta yakın, kareler boyunca yerinde duran yüz için:
+    ekranın orta-üstündeki yüz (izlenen video, oyun karakteri) yayıncı sayılmaz."""
+    h, w = kareler[0][1].shape[:2]
+    n = len(kareler)
+    for kare, (fx, fy, fw, fh) in kumeler:
+        if len(kare) < KUME_ORAN * n:
+            break                                 # kümeler büyükten küçüğe sıralı
+        cx, cy = fx + fw / 2, fy + fh / 2
+        if not (cy > KESIK_ALT * h or cx < KESIK_YAN * w or cx > (1 - KESIK_YAN) * w):
+            continue
+        if fh > TAM_KAMERA_YUZ * h:
+            continue
+        kh = min(h, int(KESIK_YUK * fh)) // 2 * 2
+        kw = min(w, int(kh * KESIK_ORAN)) // 2 * 2
+        x1 = int(min(max(cx - kw / 2, 0), w - kw))
+        y1 = int(min(max(fy - KESIK_UST * fh, 0), h - kh))
+        gw = GOVDE_GEN * fw                         # gövde: yüzün altında, omuz genişliğinde, kareye kadar
+        govde = [int(max(0, cx - gw / 2)), int(max(0, fy - 0.4 * fh)), int(min(w, cx + gw / 2)), h]
+        _, _, degisim = kenar_haritalari(kareler)
+        akt = degisim.copy()
+        akt[govde[1]:govde[3], govde[0]:govde[2]] = 0
+        return {**rapor, "karar": "kamera", "kaynak": "cercevesiz", "yuz": [round(fx), round(fy), round(fw), round(fh)],
+                "kamera": [x1, y1, x1 + kw, y1 + kh], "govde": govde, "_sutun_aktivite": akt.mean(axis=0),
+                "neden": f"{neden}; çerçevesiz kamera (arka planı kaldırılmış) sayıldı: yüz {len(kare)}/{n} "
+                         f"karede yerinde, kutu yüzden kuruldu ({kw}x{kh})"}
+    return None
+
+
+def olcu_aktar(kareler, kumeler, bilinen, rapor, neden):
+    """Kenarlar bulunamadığında aynı yayının başka klibinde doğrulanmış kamera ölçüsünü kullanır.
+    bilinen: [(kamera kutusu x1,y1,x2,y2, yüz kutusu x,y,w,h, kaynak klip)]. Yayıncının yüzü,
+    bilinen yüz boyutuna (±%35) uyan ve karelerin en az AKTAR_ORAN'ında duran yüzdür; ekrandaki
+    başka (videodaki, izlenen yayındaki) yüzler boyca elenir. Yüz bilinen bir kamera kutusunun
+    içindeyse o kutu aynen, değilse ölçü yüzün o kutudaki yerine göre taşınarak kullanılır."""
+    h, w = kareler[0][1].shape[:2]
+    n = len(kareler)
+    bw = float(np.median([b[1][2] for b in bilinen]))
+    bh = float(np.median([b[1][3] for b in bilinen]))
+    uyan = [(k, b) for k, b in kumeler
+            if len(k) >= AKTAR_ORAN * n and 0.65 <= b[2] / bw <= 1.35 and 0.65 <= b[3] / bh <= 1.35]
+    if not uyan:
+        return None
+    ana = max(uyan, key=lambda x: len(x[0]))
+    cx, cy = ana[1][0] + ana[1][2] / 2, ana[1][1] + ana[1][3] / 2
+    # aynı yüzün bölünmüş kümeleri (kafa hareketi): yakın olanları birleştir
+    grup = [(k, b) for k, b in uyan if abs(b[0] + b[2] / 2 - cx) < 2 * bw and abs(b[1] + b[3] / 2 - cy) < 2 * bw]
+    kare = set().union(*(k for k, _ in grup))
+    if len(kare) < KUME_ORAN * n:
+        return None
+    agirlik = [len(k) for k, _ in grup]
+    yuz = [float(np.average([b[j] for _, b in grup], weights=agirlik)) for j in range(4)]
+    ycx, ycy = yuz[0] + yuz[2] / 2, yuz[1] + yuz[3] / 2
+    icinde = [b for b in bilinen if b[0][0] <= ycx <= b[0][2] and b[0][1] <= ycy <= b[0][3]]
+    if icinde:                                    # en dar kutu: komşu sohbet satırı katılmamış olan
+        kam, kyuz, kaynak = min(icinde, key=lambda b: (b[0][2] - b[0][0]) * (b[0][3] - b[0][1]))
+        x1, y1, x2, y2 = kam
+        nasil = "aynı konumda"
+    else:
+        kam, kyuz, kaynak = bilinen[0]
+        kw, kh = kam[2] - kam[0], kam[3] - kam[1]
+        x1, y1 = round(yuz[0] - (kyuz[0] - kam[0])), round(yuz[1] - (kyuz[1] - kam[1]))
+        x2, y2 = x1 + kw, y1 + kh
+        tasma = max(-x1, -y1, x2 - w, y2 - h, 0)
+        if tasma > 0.15 * min(kw, kh):
+            return None
+        dx = -min(x1, 0) or -max(x2 - w, 0)
+        dy = -min(y1, 0) or -max(y2 - h, 0)
+        x1, x2, y1, y2 = x1 + dx, x2 + dx, y1 + dy, y2 + dy
+        nasil = "yüze göre taşındı"
+    _, _, degisim = kenar_haritalari(kareler)
+    akt = degisim.copy()
+    akt[max(0, y1):y2, max(0, x1):x2] = 0
+    return {**rapor, "karar": "kamera", "kaynak": "olcu_aktarimi", "yuz": [round(v) for v in yuz],
+            "kamera": [int(x1), int(y1), int(x2), int(y2)], "_sutun_aktivite": akt.mean(axis=0),
+            "neden": f"{neden}; aynı yayının {kaynak} klibindeki kamera ölçüsü ({x2 - x1}x{y2 - y1}) "
+                     f"kullanıldı ({nasil}, yüz {len(kare)}/{n} karede)"}
+
+
+def tespit(video, bas=0.0, sure=None, n=KARE, bilinen=None):
     kareler = kareleri_oku(video, bas, sure, n)
     h, w = kareler[0][1].shape[:2]
     t = yuzler(kareler)
     kumeler = kumele(t)
     rapor = {"kare": len(kareler), "cozunurluk": [w, h], "yuz_tespiti": len(t),
              "kumeler": [{"kare": len(k), "kutu": [round(v) for v in b]} for k, b in kumeler[:4]]}
+
+    def yok(neden):
+        aktarim = olcu_aktar(kareler, kumeler, bilinen, rapor, neden) if bilinen and kumeler else None
+        return aktarim or cercevesiz(kareler, kumeler, rapor, neden) or {**rapor, "karar": "yok", "neden": neden}
+
     if not kumeler or len(kumeler[0][0]) < KUME_ORAN * len(kareler):
         en = len(kumeler[0][0]) if kumeler else 0
-        return {**rapor, "karar": "yok",
-                "neden": f"yayıncı yüzü karelerin yalnız {en}/{len(kareler)}'inde aynı yerde bulundu"}
+        return yok(f"yayıncı yüzü karelerin yalnız {en}/{len(kareler)}'inde aynı yerde bulundu")
     kare_kumesi, yuz = kumeler[0]
     for k2, _ in kumeler[1:]:
         if len(k2) >= 0.25 * len(kareler) and len(k2 - kare_kumesi) >= 0.2 * len(kareler):
@@ -170,6 +281,7 @@ def tespit(video, bas=0.0, sure=None, n=KARE):
         return {**rapor, "karar": "tam_kamera",
                 "neden": f"yüz kare yüksekliğinin %{100 * yuz[3] / h:.0f}'i: tam kamera sahnesi"}
     (x1, y1, x2, y2), sinir, esik, degisim = kamera_kutusu(kareler, yuz)
+    y1, y2, yaslandi = oran_yasla(kareler, x1, y1, x2, y2, yuz)
     # oyun kırpımı için sütun etkinliği: kamera dışında kareler arası değişim (menü, olay)
     akt = degisim.copy()
     akt[max(0, y1):y2, max(0, x1):x2] = 0
@@ -180,10 +292,10 @@ def tespit(video, bas=0.0, sure=None, n=KARE):
     oran = kw / max(kh, 1)
     if kw * kh > 0.45 * w * h or not (0.8 <= oran <= 2.6) or kw < 1.8 * yuz[2] or kh < 1.4 * yuz[3] \
             or bulunan < 2:
-        return {**rapor, "karar": "yok",
-                "neden": f"kamera çerçevesi güvenilir bulunamadı ({kw}x{kh}, {bulunan}/4 kenar)"}
+        return yok(f"kamera çerçevesi güvenilir bulunamadı ({kw}x{kh}, {bulunan}/4 kenar)")
     return {**rapor, "karar": "kamera", "neden": f"yüz {len(kare_kumesi)}/{len(kareler)} karede; "
-                                                   f"çerçeve {kw}x{kh} ({bulunan}/4 kenar bulundu)"}
+                                                   f"çerçeve {kw}x{kh} ({bulunan}/4 kenar bulundu)"
+                                                   + (f"; {yaslandi}" if yaslandi else "")}
 
 
 def oyun_bolgesi(w, h, kamera, oran=OYUN_ORAN, aktivite=None):
@@ -216,9 +328,9 @@ def kesisim(a, b):
 
 
 def dikey_duzen(s, gen=1080, yuk=1920):
-    """1080x1920 için: üstte kamera (tam genişlik, oranı korunur), altta oyun; oyunun
-    üstünde ve altında BANT px'lik bulanık şerit. Altyazı üst şeride gider: ne yüzü ne
-    oyunu kapatır."""
+    """1080x1920 için: üstte kamera (tam genişlik, oranı korunur), BANT px altyazı şeridi,
+    sonra oyun; en altta ALT_ARAYUZ px bulanık şerit (Shorts arayüzü oyunu kapatmasın).
+    Altyazı üst şeride gider: ne yüzü ne oyunu kapatır."""
     w, h = s["cozunurluk"]
     x1, y1, x2, y2 = s["kamera"]
     ic = 2                                              # çerçeve çizgisini dışarıda bırak
@@ -226,17 +338,30 @@ def dikey_duzen(s, gen=1080, yuk=1920):
     kx2, ky2 = x2 - (ic if x2 < w else 0), y2 - (ic if y2 < h else 0)
     ust = int(min(max(gen * (ky2 - ky1) / (kx2 - kx1), UST_MIN * yuk), UST_MAX * yuk)) // 2 * 2
     alt = yuk - ust
-    oran = min(max(gen / (alt - 2 * BANT), 1.0), 1.45)
-    oyun = oyun_bolgesi(w, h, s["kamera"], oran, s.get("_sutun_aktivite"))
-    maske = kesisim(oyun, s["kamera"])
-    bant = (alt - gen * h / (oyun[2] - oyun[0])) / 2
+    oran = min(max(gen / (alt - BANT - ALT_ARAYUZ), 1.0), 1.6)
+    kisi = s.get("govde") or s["kamera"]                 # çerçevesiz kamerada yalnız gövde oyunu kapatır
+    oyun = oyun_bolgesi(w, h, kisi, oran, s.get("_sutun_aktivite"))
+    maske = kesisim(oyun, kisi)
+    bos = alt - gen * h / (oyun[2] - oyun[0])          # alt bölümde oyun dışında kalan yükseklik
+    bant = min(BANT, bos / 2)
     return {"kamera_kirp": [kx1, ky1, kx2, ky2], "oyun": list(oyun), "maske": list(maske) if maske else None,
-            "ust_oran": round(ust / yuk, 4), "altyazi_y": int(ust + bant / 2) if bant >= 110 else ust}
+            "ust_oran": round(ust / yuk, 4), "oyun_ust": int(bant),
+            "altyazi_y": int(ust + bant / 2) if bant >= 110 else ust}
 
 
-def bolgeler(video, bas=0.0, sure=None):
-    """tespit + dikey yerleşim (kamera kırpımı, oyun kırpımı, maske, altyazı konumu)."""
-    s = tespit(video, bas, sure)
+def ust_yuz_orani(video, ust_oran, n=8):
+    """Bitmiş dikey videonun kamera bölümünde (üst ust_oran'lık kısım) yüz görünen kare oranı.
+    Kadraj yanlış yere oturduysa (kamera yerine oyun/sohbet) burada yüz çıkmaz."""
+    kareler = kareleri_oku(video, 0.0, None, n)
+    h = kareler[0][1].shape[0]
+    ust = [(t, np.ascontiguousarray(k[:max(1, int(h * ust_oran))])) for t, k in kareler]
+    return len({d[0] for d in yuzler(ust)}) / len(ust)
+
+
+def bolgeler(video, bas=0.0, sure=None, bilinen=None):
+    """tespit + dikey yerleşim (kamera kırpımı, oyun kırpımı, maske, altyazı konumu).
+    bilinen: aynı yayında doğrulanmış kamera ölçüleri (kenar bulunamazsa kullanılır)."""
+    s = tespit(video, bas, sure, bilinen=bilinen)
     if s["karar"] == "kamera":
         s.update(dikey_duzen(s))
     s.pop("_sutun_aktivite", None)

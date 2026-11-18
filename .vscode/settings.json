@@ -1,0 +1,10 @@
+{
+  // Gezginde yalnız kod ve Shorts/ görünsün; gizlenenler diskte duruyor.
+  // Ara dosyalara bakmak için ilgili satırı false yapın.
+  "files.exclude": {
+    "yayinlar": true,
+    "araclar": true,
+    "modeller": true,
+    "**/__pycache__": true
+  }
+}

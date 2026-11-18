@@ -214,6 +214,7 @@ def oku_kick(veri):
 
 KICK_URL = re.compile(r"kick\.com/([^/\s]+)/videos?/([A-Za-z0-9-]+)")
 KICK_KAPSAM_TOLERANS = 120       # sn: başlangıca bu kadar yaklaşılmadıysa sohbet eksik sayılır
+KICK_ARA_KAYIT = 200             # bu kadar sayfada bir ara kayıt (~2 dk; kesilirse kaldığı yerden)
 
 
 def uuid7_zamani(vid):
@@ -267,32 +268,58 @@ def kick_indir(vid, kanal=None, hedef=None):
     imlec = bas_us + int(sure_ms) * 1000
     toplam_us = imlec - bas_us
     mesajlar, sayfa, bitis = {}, 0, None
-    print("Sohbet sondan başa doğru indiriliyor...")
-    while True:
-        d = http_json(f"https://kick.com/api/v2/channels/{kanal}/messages?cursor={imlec}", deneme=8)
-        data = d.get("data") or {}
-        for m in data.get("messages") or []:
-            # yalnız oku_kick'in kullandığı alanlar (tam nesne yayın başına yüzlerce MB eder)
-            mesajlar[m.get("id") or (m.get("created_at"), m.get("content"))] = {
-                "id": m.get("id"), "created_at": m.get("created_at"), "content": m.get("content"),
-                "type": m.get("type"), "sender": {"username": (m.get("sender") or {}).get("username")}}
-        sayfa += 1
-        if sayfa % 20 == 0:
-            yuzde = 100 * (1 - (imlec - bas_us) / toplam_us)
-            print(f"  {sayfa} sayfa, {len(mesajlar)} mesaj (%{yuzde:.0f})", flush=True)
-        try:
-            yeni = int(data.get("cursor"))
-        except (TypeError, ValueError):
-            bitis = "cursor yok"
-            break
-        if yeni < bas_us:
-            bitis = "yayın başlangıcına ulaşıldı"
-            break
-        if yeni >= imlec:
-            bitis = "cursor ilerlemedi"
-            break
-        imlec = yeni
-        time.sleep(0.15)
+    devam = hedef.with_suffix(".devam.json")         # yarıda kesilirse kaldığı yerden sürer
+    if devam.exists():
+        d0 = json.loads(devam.read_text(encoding="utf-8"))
+        if d0.get("bas_us") == bas_us and d0.get("kanal") == kanal:
+            imlec, sayfa = d0["imlec"], d0["sayfa"]
+            mesajlar = {m.get("id") or (m.get("created_at"), m.get("content")): m for m in d0["mesajlar"]}
+            print(f"Yarım kalan indirme bulundu: {sayfa} sayfa, {len(mesajlar)} mesaj; kaldığı yerden sürüyor")
+
+    def ara_kaydet():
+        gecici = devam.with_suffix(".part")
+        gecici.write_text(json.dumps({"bas_us": bas_us, "kanal": kanal, "imlec": imlec, "sayfa": sayfa,
+                                      "mesajlar": list(mesajlar.values())}, ensure_ascii=False), encoding="utf-8")
+        gecici.replace(devam)
+
+    print("Sohbet sondan başa doğru indiriliyor (yarıda kesilirse aynı komut kaldığı yerden sürdürür)...")
+    t0, ilk_imlec = time.time(), imlec
+    try:
+        while True:
+            d = http_json(f"https://kick.com/api/v2/channels/{kanal}/messages?cursor={imlec}", deneme=8)
+            data = d.get("data") or {}
+            for m in data.get("messages") or []:
+                # yalnız oku_kick'in kullandığı alanlar (tam nesne yayın başına yüzlerce MB eder)
+                mesajlar[m.get("id") or (m.get("created_at"), m.get("content"))] = {
+                    "id": m.get("id"), "created_at": m.get("created_at"), "content": m.get("content"),
+                    "type": m.get("type"), "sender": {"username": (m.get("sender") or {}).get("username")}}
+            sayfa += 1
+            if sayfa % 20 == 0:
+                bitti = 1 - (imlec - bas_us) / toplam_us
+                hiz = (ilk_imlec - imlec) / max(time.time() - t0, 1e-6)         # yayın-µs / sn
+                kalan_dk = (imlec - bas_us) / hiz / 60 if hiz > 0 else 0
+                print(f"  %{100 * bitti:.0f} · {sayfa} sayfa · {len(mesajlar)} mesaj · kalan ~{kalan_dk:.0f} dk",
+                      flush=True)
+            if sayfa % KICK_ARA_KAYIT == 0:
+                ara_kaydet()
+            try:
+                yeni = int(data.get("cursor"))
+            except (TypeError, ValueError):
+                bitis = "cursor yok"
+                break
+            if yeni < bas_us:
+                bitis = "yayın başlangıcına ulaşıldı"
+                break
+            if yeni >= imlec:
+                bitis = "cursor ilerlemedi"
+                break
+            imlec = yeni
+            time.sleep(0.15)
+    except BaseException:                            # ağ hatası, Ctrl+C: ilerleme kaybolmasın
+        ara_kaydet()
+        print(f"\nİndirme kesildi; {sayfa} sayfa / {len(mesajlar)} mesaj kaydedildi ({devam}). "
+              "Aynı komutu tekrar çalıştırın, kaldığı yerden sürer.")
+        raise
     kalan = max(0.0, (imlec - bas_us) / 1_000_000)
     tamam = bitis == "yayın başlangıcına ulaşıldı" or kalan <= KICK_KAPSAM_TOLERANS
     liste = sorted(mesajlar.values(), key=lambda m: str(m.get("created_at", "")))
@@ -304,13 +331,15 @@ def kick_indir(vid, kanal=None, hedef=None):
                        "sayfa": sayfa},
             "messages": liste}
     if not tamam:
+        ara_kaydet()                                 # tekrar denendiğinde buradan sürsün
         eksik = hedef.with_suffix(".eksik.json")
         eksik.write_text(json.dumps(veri, ensure_ascii=False), encoding="utf-8")
         sys.exit(f"Kick sohbeti EKSİK: {bitis}; yayının ilk {kalan:.0f} sn'si indirilemedi. "
-                 f"Kısmi veri {eksik} (kullanılmaz).")
+                 f"Kısmi veri {eksik} (kullanılmaz). Aynı komut kaldığı yerden yeniden dener.")
     gecici = hedef.with_suffix(".json.part")
     gecici.write_text(json.dumps(veri, ensure_ascii=False), encoding="utf-8")
     gecici.replace(hedef)
+    devam.unlink(missing_ok=True)                    # tamamlandı: ara kayıt gereksiz
     print(f"Kick sohbeti kaydedildi: {hedef} ({len(liste)} mesaj, {sayfa} sayfa, {bitis})")
     return veri
 
@@ -416,6 +445,7 @@ SELAM_ASIL = {_sikistir(w) for w in """selam slm sa sea selamün selamun selamun
 aleykümselam as merhaba merhabalar mrb meraba hoşgeldin hosgeldin hoşgeldiniz hg hoşbulduk hosbulduk hb
 geldin geceler akşamlar aksamlar yayınlar yayinlar görüşürüz gorusuruz görüşmek gorusmek
 günaydın gunaydin uykular baybay bb gelsin hi hello hey yo hallo servus moin gn goodnight night
+bye byee cya wb gm sup wassup whatsup howdy hiya heyo
 bye byebye cya morning gm nacht tschüss tschüs tschau ciao n8 abend morgen""".split()}
 SELAM_EK = {_sikistir(w) for w in """iyi hoş hos kolay good gute guten see you bis dir dich euch herkese
 abi abim abicim abla kanka kardeşim hocam reis kral chat all everyone guys leute alle ve and und

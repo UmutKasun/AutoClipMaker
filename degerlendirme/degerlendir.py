@@ -4,7 +4,7 @@
 bakar. Etiketler sohbet okunarak verilmiştir; kesin başarı için bkz. rapor.py.
 
 Çalıştırma (proje kökünden):  python degerlendirme/degerlendir.py
-Gerekli yerel veriler: chat.json, chat-emotes.json,
+Gerekli yerel veriler: yayinlar/2930392468/chat.json, chat-emotes.json,
                        yayinlar/2931374918/chat.json, yayinlar/2931374918/chat-emotes.json
 """
 import json
@@ -24,7 +24,7 @@ def yukle(yol, emo):
     return kalan, n, sk.Adlandirici(em, sk.dil_tahmin(m["metin"] for m in kalan))
 
 
-V = {"Se7en": yukle(K / "chat.json", K / "chat-emotes.json"),
+V = {"Se7en": yukle(K / "yayinlar/2930392468/chat.json", K / "yayinlar/2930392468/chat-emotes.json"),
      "SCHRADIN": yukle(K / "yayinlar/2931374918/chat.json",
                        K / "yayinlar/2931374918/chat-emotes.json")}
 

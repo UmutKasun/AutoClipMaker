@@ -19,6 +19,7 @@ Karar (otomatik telif onayı DEĞİLDİR):
 
 import argparse
 import json
+import re
 import subprocess
 import sys
 import time
@@ -31,6 +32,7 @@ SR = 44100
 N_FFT, HOP, DIM_F, DIM_T, TELAFI = 7680, 1024, 3072, 256, 1.009
 KONUSMA_KORUMA_DB = -6.0      # kelime anlarında konuşma/orijinal en az bu kadar
 ARKA_ZAYIF_DB = -20.0         # arka plan/orijinal bunun altındaysa ayrıştırma gereksiz
+HEDEF_LUFS, HEDEF_TP, HEDEF_LRA = -14, -1.5, 11    # Shorts/mobil için yaygın hedef
 OLU_SESSIZLIK = 3.0           # ayrıştırma bu kadar sn yeni sessizlik yaratırsa kalite bozuk sayılır
 
 
@@ -136,13 +138,34 @@ def karar_ver(mix, konusma, kelimeler):
     return rapor
 
 
-def yaz(video, ses, cikti):
-    """Görüntü olduğu gibi kopyalanır, ses AAC 192k."""
+def _ham(ses):
+    return np.ascontiguousarray(np.clip(ses, -1, 1).T).astype(np.float32).tobytes()
+
+
+def yukseklik_olc(ses):
+    """loudnorm 1. geçiş: EBU R128 ölçümü (sözlük: input_i, input_tp, input_lra, input_thresh, target_offset)."""
+    r = subprocess.run(["ffmpeg", "-hide_banner", "-nostats", "-nostdin", "-f", "f32le", "-ac", "2", "-ar", str(SR),
+                        "-i", "-", "-af", f"loudnorm=I={HEDEF_LUFS}:TP={HEDEF_TP}:LRA={HEDEF_LRA}:print_format=json",
+                        "-f", "null", "-"], input=_ham(ses), capture_output=True)
+    m = re.search(r"\{[^{}]*\"input_i\"[^{}]*\}", r.stderr.decode("utf-8", "replace"))
+    if r.returncode != 0 or not m:
+        sys.exit("ses yüksekliği ölçülemedi (loudnorm)")
+    return json.loads(m.group(0))
+
+
+def yaz(video, ses, cikti, rapor=None):
+    """Görüntü olduğu gibi kopyalanır; ses Shorts yüksekliğine (-14 LUFS) iki geçişle eşitlenir, AAC 192k."""
+    o = yukseklik_olc(ses)
+    af = (f"loudnorm=I={HEDEF_LUFS}:TP={HEDEF_TP}:LRA={HEDEF_LRA}:measured_I={o['input_i']}:"
+          f"measured_TP={o['input_tp']}:measured_LRA={o['input_lra']}:measured_thresh={o['input_thresh']}:"
+          f"offset={o['target_offset']}:linear=true,aresample={SR}")
+    if rapor is not None:
+        rapor["yukseklik_lufs_once"] = float(o["input_i"])
     p = subprocess.Popen(["ffmpeg", "-v", "error", "-y", "-nostdin", "-i", str(video), "-f", "f32le", "-ac", "2",
-                          "-ar", str(SR), "-i", "-", "-map", "0:v:0", "-map", "1:a:0", "-c:v", "copy",
+                          "-ar", str(SR), "-i", "-", "-map", "0:v:0", "-map", "1:a:0", "-c:v", "copy", "-af", af,
                           "-c:a", "aac", "-b:a", "192k", "-shortest", "-movflags", "+faststart", str(cikti)],
                          stdin=subprocess.PIPE)
-    p.communicate(np.ascontiguousarray(np.clip(ses, -1, 1).T).astype(np.float32).tobytes())
+    p.communicate(_ham(ses))
     if p.returncode != 0:
         sys.exit(f"ffmpeg hata verdi ({p.returncode}).")
 
@@ -162,15 +185,14 @@ def main():
     kel = json.loads(Path(a.kelimeler).read_text(encoding="utf-8"))["kelimeler"] if a.kelimeler else []
     r = karar_ver(mix, konusma, kel)
     r["sure_sn"] = round(time.time() - t0, 1)
-    tepe = float(np.max(np.abs(konusma))) or 1.0
     if r["karar"] == "ayristirildi":
-        yaz(a.video, konusma * min(1.0, 0.98 / tepe), a.cikti)
+        yaz(a.video, konusma, a.cikti, r)
     else:
         if a.alternatif and r.get("kelime"):          # elle seçilebilsin: yalnız konuşma sürümü
-            yaz(a.video, konusma * min(1.0, 0.98 / tepe), a.alternatif)
+            yaz(a.video, konusma, a.alternatif)
             r["alternatif"] = str(a.alternatif)
-        subprocess.run(["ffmpeg", "-v", "error", "-y", "-nostdin", "-i", a.video, "-map", "0", "-c", "copy",
-                        "-movflags", "+faststart", a.cikti], check=True)
+        yaz(a.video, mix, a.cikti, r)                 # orijinal ses, yalnız yüksekliği eşitlenir
+    r["yukseklik_hedef_lufs"] = HEDEF_LUFS
     print(json.dumps(r, ensure_ascii=False))
     if a.rapor:
         Path(a.rapor).write_text(json.dumps(r, ensure_ascii=False, indent=1), encoding="utf-8")

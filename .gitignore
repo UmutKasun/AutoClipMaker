@@ -2,9 +2,9 @@
 *.mp4
 *.zip
 *.part
-TwitchDownloaderCLI/
-kaynak/
-klipler/
+araclar/
+
+
 yayinlar/*/kaynak/
 yayinlar/*/klipler/
 
@@ -19,3 +19,4 @@ yayinlar/*/uretim/
 
 # İndirilen modeller (kaynakları kamera_tespit.py / ses_ayristir.py içinde)
 modeller/*.onnx
+Shorts/

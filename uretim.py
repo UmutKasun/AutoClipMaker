@@ -45,7 +45,7 @@ from dikey_kompozisyon import araliklar
 from duzen import profil
 
 PROJE = Path(__file__).resolve().parent
-TDCLI = PROJE / "TwitchDownloaderCLI" / "TwitchDownloaderCLI.exe"
+TDCLI = PROJE / "araclar" / "TwitchDownloaderCLI" / "TwitchDownloaderCLI.exe"
 
 SURE, ONCE, PAY, ADET, DILIM = 40.0, 25.0, 5.0, 15, 15.0
 HEDEF = "5-8"
@@ -72,6 +72,14 @@ SONRA_EN_AZ = 12.0              # olaydan sonra en az
 KLIP_MIN, KLIP_MAX = 20.0, 60.0
 INDIR_ONCE, INDIR_SONRA = 25, 55     # olay çevresinde indirilen pencere (sn); tüm yayın indirilmez
 OTOMATIK_ADET = 10
+SAHNE = 120                     # birbirine bu kadar sn'den yakın adaylar tek sahne (tek klip) sayılır
+SAHNE_BAGLAM = 20               # birleşen sahnede en güçlü olaydan en fazla bu kadar önce başlanır
+YOGUN_YUZDE = 0.90              # aday dilim, yayının bu yüzdelik dilim yoğunluğunda ya da üstünde olmalı
+DOYGUN_ORAN = 2.0               # en yoğun dilimler ortancanın bu katına çıkamıyorsa sohbet doygun (tavanda)
+YEDEK = 5                      # boş çıkan klip yerine sırayla üretilecek yedek aday sayısı
+BOS_KELIME = 10                 # kamera yok + bundan az konuşma = yayıncı anı değil (tanıtım/ara ekran)
+UST_YUZ_MIN = 0.5               # bitmiş videoda kamera bölümünde yüz bundan az karede görünürse: kadraj sorunu
+CIKTI = PROJE / "Shorts"       # nihai MP4'ler: Shorts/<kanal> <tarih> <başlık>/NN - <başlık>.mp4
 KENAR = 180                     # yayının ilk/son bu kadar sn'si aday olmaz
 
 
@@ -260,6 +268,13 @@ def gecici_ad(hedef):
     return hedef.with_name(f"{hedef.stem}.part{hedef.suffix}")
 
 
+def eski_yere(yol):
+    """Değiştirilen çıktıyı silmeden aynı klasördeki eski/ altına tarihli adla taşır."""
+    eski = yol.parent / "eski"
+    eski.mkdir(exist_ok=True)
+    os.replace(yol, eski / f"{yol.stem}.{datetime.now():%Y%m%d-%H%M%S}{yol.suffix}")
+
+
 def adim(klip, ad, hedef, imz, uret, dogrula):
     """uret(gecici_yol); dogrula(yol) -> (hatalar, uyarılar). Döner: 'atlandı' | 'üretildi'."""
     kayit = klip["adimlar"].get(ad)
@@ -279,8 +294,8 @@ def adim(klip, ad, hedef, imz, uret, dogrula):
         hatalar, uyarilar = dogrula(gecici)
         if hatalar:
             raise AdimHatasi(f"{ad} doğrulanamadı: " + "; ".join(hatalar))
-        if hedef.exists():                        # eski çıktı silinmez: tarihli .eski adıyla saklanır
-            os.replace(hedef, hedef.with_name(f"{hedef.stem}.{datetime.now():%Y%m%d-%H%M%S}.eski{hedef.suffix}"))
+        if hedef.exists():                        # eski çıktı silinmez: eski/ altında tarihli saklanır
+            eski_yere(hedef)
         os.replace(gecici, hedef)
     finally:
         gecici.unlink(missing_ok=True)            # başarısız deneme kalıntısı; önceki hedef korunur
@@ -310,7 +325,10 @@ def yerlesim_karari(kanal, oyun_araligi=None, secim=None, tespit=None):
                     "--ust-oran", f"{tespit['ust_oran']:g}"]
             if tespit.get("maske"):
                 args += ["--maske", f(tespit["maske"])]
+            if tespit.get("oyun_ust") is not None:
+                args += ["--oyun-ust", str(tespit["oyun_ust"])]
             return {"tur": "otomatik", "onay_gerekli": False, "args": args, "altyazi_y": tespit["altyazi_y"],
+                    "ust_oran": tespit["ust_oran"],
                     "neden": f"otomatik kamera tespiti: {tespit['neden']}; kamera {f(tespit['kamera'])}, "
                              f"oyun {f(tespit['oyun'])}" + (" (çakışan kamera maskelendi)" if tespit.get("maske") else "")}
         return {"tur": "guvenli", "onay_gerekli": False, "args": ["--guvenli"], "tespit_yok": True,
@@ -368,14 +386,82 @@ def tepki_araligi(ts, t, dilim=DILIM):
     return float(a0 + i), float(a0 + pk), float(a0 + j + 1)
 
 
-def klip_sinirlari(olay, tepki_son, uzunluk):
-    """Olaydan ONCE_OLAY önce başlar; sohbet tepkisi sönene (gecikme düşülerek) ya da en az
-    SONRA_EN_AZ sonrasına kadar sürer; KLIP_MIN-KLIP_MAX arası."""
-    bas = max(0.0, olay - ONCE_OLAY)
+def klip_sinirlari(olay, tepki_son, uzunluk, baglam=None):
+    """Olaydan ONCE_OLAY önce başlar (birleşen sahnede `baglam`a kadar, en fazla SAHNE_BAGLAM);
+    sohbet tepkisi sönene (gecikme düşülerek) ya da en az SONRA_EN_AZ sonrasına kadar sürer;
+    KLIP_MIN-KLIP_MAX arası."""
+    bas = olay - ONCE_OLAY
+    if baglam is not None:
+        bas = min(bas, max(baglam, olay - SAHNE_BAGLAM))
+    bas = max(0.0, bas)
     son = max(olay + SONRA_EN_AZ, tepki_son - GECIKME + 3)
     son = max(min(son, bas + KLIP_MAX), bas + KLIP_MIN)
     son = min(son, uzunluk) if uzunluk else son
     return round(bas, 3), round(son - bas, 3)
+
+
+def dilim_yogunlugu(kalan, n_dilim):
+    """anlari_sec ile aynı sayım: dilim başına kişi başı en fazla KISI_TAVAN mesaj."""
+    from collections import Counter
+    say = [Counter() for _ in range(n_dilim)]
+    for m in kalan:
+        say[min(int(m["t"] // DILIM), n_dilim - 1)][m["ad"]] += 1
+    return [sum(min(v, sk.KISI_TAVAN) for v in c.values()) for c in say]
+
+
+def doygun_mu(yogunluk):
+    """Sohbet tavanda mı: en yoğun dilimler ortanca dilimin DOYGUN_ORAN katına çıkamıyorsa mesaj
+    sayısı artamıyor demektir (ohnePixel: 15 sn'de 80-190 mesaj, oran 1.5; Eray ~10)."""
+    s = sorted(x for x in yogunluk if x > 0)
+    return bool(s) and s[int(0.99 * (len(s) - 1))] < DOYGUN_ORAN * s[len(s) // 2]
+
+
+def doygun_anlar(kalan, n_dilim, adci, pencerede):
+    """Doygun sohbette mesaj sayısı yerine tepki mesajı sayısının (lol, ????, W, oooo) sıçraması.
+    anlari_sec ile aynı alanları döndürür; eşik: tepki sayısı ortalama + 2 sd."""
+    import statistics
+    from collections import Counter
+    kisi_say = [Counter() for _ in range(n_dilim)]
+    sayilan = [[] for _ in range(n_dilim)]
+    for m in kalan:
+        i = min(int(m["t"] // DILIM), n_dilim - 1)
+        kisi_say[i][m["ad"]] += 1
+        if kisi_say[i][m["ad"]] <= sk.KISI_TAVAN:
+            sayilan[i].append(m["metin"])
+    tepki = [sum(map(adci.tepki_mi, s)) for s in sayilan]
+    ort, sd = statistics.fmean(tepki), statistics.pstdev(tepki)
+    esik = ort + 2 * sd
+    k = max(1, round(sk.IVME_PENCERE / DILIM))
+    en_t, en_k = max(tepki) or 1, max(len(c) for c in kisi_say) or 1
+    adaylar = []
+    for i in range(n_dilim):
+        if tepki[i] <= esik or not sayilan[i]:
+            continue
+        onceki = tepki[max(0, i - k):i]
+        ivme = (tepki[i] + ort) / ((statistics.fmean(onceki) if onceki else 0.0) + ort)
+        puan = 100 * (0.5 * tepki[i] / en_t + 0.2 * len(kisi_say[i]) / en_k + 0.3 * min(ivme / sk.IVME_TAVAN, 1.0))
+        adaylar.append({"i": i, "t": i * DILIM, "ham": sum(kisi_say[i].values()), "kisi": len(kisi_say[i]),
+                        "agir": len(sayilan[i]), "ivme": ivme, "tepki": tepki[i] / len(sayilan[i]),
+                        "soru": sum(map(adci.soru_mu, sayilan[i])) / len(sayilan[i]), "soru_cevap": False,
+                        "puan": puan, "metinler": sayilan[i]})
+    icerde = [a for a in adaylar if pencerede(a["t"])]
+    icerde.sort(key=lambda a: (-a["puan"], a["i"]))
+    secilen = []
+    for a in icerde:
+        if all(abs(a["t"] - s["t"]) >= sk.ARALIK for s in secilen):
+            secilen.append(a)
+    return {"ort": ort, "sd": sd, "esik": esik, "aday": len(adaylar), "disarida": len(adaylar) - len(icerde)}, secilen
+
+
+def sahnelere_ayir(secilen):
+    """Birbirine SAHNE sn'den yakın adayları zincirleyip gruplar; gruplar en iyi puana göre sıralı."""
+    gruplar = []
+    for s in sorted(secilen, key=lambda x: x["t"]):
+        if gruplar and s["t"] - gruplar[-1][-1]["t"] <= SAHNE:
+            gruplar[-1].append(s)
+        else:
+            gruplar.append([s])
+    return sorted(gruplar, key=lambda g: -max(x["puan"] for x in g))
 
 
 def analiz(sohbet, adet):
@@ -396,15 +482,37 @@ def analiz(sohbet, adet):
     dil = sk.dil_tahmin(m["metin"] for m in kalan)
     adci = sk.Adlandirici(emotelar, dil)
     # yayının ilk/son KENAR sn'si: katılım ve veda dalgası (an değil)
-    ozet, secilen = sk.anlari_sec(kalan, n_dilim, DILIM, adci, adet,
-                                  pencerede=lambda t: KENAR <= t <= uzunluk - KENAR)
-    ts = sorted(m["t"] for m in kalan)
+    ozet, ham_secilen = sk.anlari_sec(kalan, n_dilim, DILIM, adci, max(4 * adet, 40),
+                                      pencerede=lambda t: KENAR <= t <= uzunluk - KENAR)
+    # mutlak eşik: sakin bölümdeki kısa hızlanma, yayının gerçekten yoğun anlarıyla yarışmasın
+    yogunluk = dilim_yogunlugu(kalan, n_dilim)
+    taban = sorted(yogunluk)[min(len(yogunluk) - 1, int(YOGUN_YUZDE * len(yogunluk)))]
+    yontem = "hacim"
+    if doygun_mu(yogunluk):
+        # sohbet tavanda: hacim artamıyor, tepki mesajlarının sıçramasına bakılır; zamanlama da onlarla
+        yontem = "tepki (doygun sohbet)"
+        ozet, ham_secilen = doygun_anlar(kalan, n_dilim, adci, lambda t: KENAR <= t <= uzunluk - KENAR)
+        yogun = ham_secilen
+        ts = sorted(m["t"] for m in kalan if adci.tepki_mi(m["metin"]))
+    else:
+        yogun = [s for s in ham_secilen if s["agir"] >= taban]
+        ts = sorted(m["t"] for m in kalan)
+    ozet["yogun_disi"] = len(ham_secilen) - len(yogun)
+    print(f"Seçim yöntemi: {yontem}")
+    sahneler = sahnelere_ayir(yogun)
+    ozet["birlesen"] = sum(len(g) - 1 for g in sahneler)
     adaylar = []
-    for sira, s in enumerate(secilen, 1):
+    for sira, grup in enumerate(sahneler[:adet + YEDEK], 1):
+        s = max(grup, key=lambda x: x["puan"])
         ad = adci.ad(s["metinler"]) or f"AN {sira}"
         tb, tp, tson = tepki_araligi(ts, s["t"])
         olay = max(0.0, tb - GECIKME)
-        bas, sure = klip_sinirlari(olay, tson, uzunluk)
+        baglam = None
+        if len(grup) > 1:                         # aynı sahne: tepkisi en uzun süreni ve en erken başlangıç
+            uyeler = [tepki_araligi(ts, x["t"]) for x in grup]
+            tson = max(u[2] for u in uyeler)
+            baglam = min(max(0.0, u[0] - GECIKME) for u in uyeler) - ONCE_OLAY
+        bas, sure = klip_sinirlari(olay, tson, uzunluk, baglam)
         gorulen, ornek = set(), []
         for m in s["metinler"]:
             if m.strip().lower() not in gorulen and len(ornek) < 3:
@@ -417,6 +525,8 @@ def analiz(sohbet, adet):
                         "t": s["t"], "olay": olay, "bas": bas, "sure": sure, "ad": ad,
                         "puan": round(s["puan"], 1), "aciklama": aciklama,
                         "tepki_araligi": [tb, tp, tson], "ucuncu_taraf_ipucu": ucuncu,
+                        "baglam": baglam, "birlesen": [sk.sure_yaz(x["t"]) for x in grup if x is not s],
+                        "yedek": sira > adet,
                         "mesaj": s["ham"], "kisi": s["kisi"], "ivme": round(s["ivme"], 2),
                         "tepki": round(s["tepki"], 3), "soru": round(s["soru"], 3),
                         "soru_cevap": s["soru_cevap"], "ornekler": ornek})
@@ -424,7 +534,8 @@ def analiz(sohbet, adet):
     bosluk = max(((b - a, a) for a, b in zip(zamanlar, zamanlar[1:])), default=(0, 0))
     analiz_ozet = {"mesaj": len(mesajlar), "sayilan": len(kalan), "esik": round(ozet["esik"], 2),
                    "aday_dilim": ozet["aday"], "elenen": dict(elenen),
-                   "kenar_disi": ozet["disarida"],
+                   "kenar_disi": ozet["disarida"], "yogun_disi": ozet["yogun_disi"],
+                   "yogun_esik": taban, "birlesen": ozet["birlesen"], "yontem": yontem,
                    "kapsam": {"ilk_sn": round(zamanlar[0], 1), "son_sn": round(zamanlar[-1], 1),
                               "en_uzun_bosluk_sn": round(bosluk[0], 1), "bosluk_bas_sn": round(bosluk[1], 1)}}
     if platform == "Kick":
@@ -436,6 +547,7 @@ def analiz(sohbet, adet):
         st = veri.get("streamer") or {}
         meta = {"kanal": (st.get("login") or "").lower(), "yayinci": st.get("name") or "",
                 "baslik": (veri.get("video") or {}).get("title") or "", "uzunluk": uzunluk, "dil": dil,
+                "baslangic": (veri.get("video") or {}).get("created_at"),
                 "analiz": analiz_ozet}
     return meta, adaylar
 
@@ -741,7 +853,8 @@ def olay_hizala(parca, ib, aday):
         if s[pk] >= float(np.median(s)) + 6:
             o, kaynak = pk * F, "ses tepesi"
     tson = (aday.get("tepki_araligi") or [0, 0, aday["bas"] + aday["sure"] + GECIKME - 3])[2] - ib
-    bas, sure = klip_sinirlari(o, tson, uz)
+    baglam = aday.get("baglam")
+    bas, sure = klip_sinirlari(o, tson, uz, None if baglam is None else baglam - ib)
     son = bas + sure
 
     def sessiz(a, b):
@@ -783,7 +896,7 @@ def otomatik_kontrol(zaman, yer, ses, n_kelime, n_incele, uyarilar):
          "ses": (ses or {}).get("neden", "ayrıştırma yapılmadı"),
          "zaman": f"olay klibin {zaman['olay_klipte']:g}. sn'sinde ({zaman['kaynak']}), süre {zaman['sure']:g} sn"}
     sorun = []
-    if yer["tur"] == "guvenli":
+    if yer["tur"] == "guvenli" or any(u.startswith("kadraj:") for u in uyarilar):
         sorun.append("kadraj")
     if not n_kelime or n_kelime < 5:
         sorun.append("altyazı")
@@ -793,6 +906,14 @@ def otomatik_kontrol(zaman, yer, ses, n_kelime, n_incele, uyarilar):
         sorun.append("zaman")
     k["sorun"] = sorun
     return k, not sorun
+
+
+def bilinen_kameralar(k, haric=None):
+    """Aynı yayında kenarlarıyla doğrulanmış kamera ölçüleri: [(kamera, yüz, klip kökü)].
+    Ölçü aktarımıyla bulunanlar kaynak sayılmaz (hata zincirlenmesin)."""
+    return [(t["kamera"], t["yuz"], kok) for kok, c in k.get("klipler", {}).items()
+            if kok != haric and (t := c.get("kamera_tespit") or {}).get("karar") == "kamera"
+            and t.get("kaynak") not in ("olcu_aktarimi", "cercevesiz") and t.get("kamera") and t.get("yuz")]
 
 
 def klip_uret(k, aday, a):
@@ -845,11 +966,11 @@ def klip_uret(k, aday, a):
     if secim != "guvenli" and not (k["kanal"] and profil.profil_yolu(k["kanal"]).is_file()):
         import kamera_tespit
         try:
-            tespit = kamera_tespit.bolgeler(parca, ofs, sure)
+            tespit = kamera_tespit.bolgeler(parca, ofs, sure, bilinen_kameralar(k, kok))
         except Exception as e:                       # noqa: BLE001 - tespit hatası güvenliye düşer
             tespit = {"karar": "yok", "neden": f"tespit çalışmadı: {e}"}
-        klip["kamera_tespit"] = {x: tespit.get(x) for x in ("karar", "neden", "yuz", "kamera", "oyun", "maske",
-                                                            "ust_oran", "altyazi_y")}
+        klip["kamera_tespit"] = {x: tespit.get(x) for x in ("karar", "neden", "kaynak", "yuz", "kamera", "oyun",
+                                                            "maske", "ust_oran", "oyun_ust", "altyazi_y")}
     yer = yerlesim_karari(k["kanal"], k.get("oyun_araliklari", {}).get(kok), secim, tespit)
     klip["yerlesim"] = {"tur": yer["tur"], "neden": yer["neden"]}
     print(f"    yerleşim: {yer['tur']} - {yer['neden']}")
@@ -869,11 +990,9 @@ def klip_uret(k, aday, a):
     klip["adimlar"]["dikey"]["ses_imza"] = imz_ses
     kel_js = dikey.with_name(dikey.stem + ".kelimeler.json")
     if sonuc == "üretildi" and onceki_ses != imz_ses:
-        # ses değişti: eski transkripsiyon geçersiz (silinmez, tarihli saklanır)
-        damga = f"{datetime.now():%Y%m%d-%H%M%S}"
-        for eski_js in (kel_js, kel_js.with_suffix(".json.bak")):
-            if eski_js.exists():
-                eski_js.replace(eski_js.with_name(f"{eski_js.name}.{damga}.eski"))
+        # ses değişti: eski transkripsiyon geçersiz (silinmez, eski/ altında saklanır)
+        if kel_js.exists():
+            eski_yere(kel_js)
     print(f"    dikey   : {sonuc} -> {goreli(dikey)}")
 
     # 5. altyazı (yüzü ve oyunu kapatmayan şeritte)
@@ -885,7 +1004,8 @@ def klip_uret(k, aday, a):
             y_args = ["--y", str(yer["altyazi_y"])]
         else:
             y_args = []
-        imz_son = imza(imz_dikey, dil, y_args)
+        duz = duzeltme_imzasi(kel_js)                 # elle düzeltme varsa altyazı yeniden yakılır
+        imz_son = imza(imz_dikey, dil, y_args, "tani-4", *([duz] if duz else []))
         sonuc = adim(klip, "altyazi", altyazili, imz_son,
                      lambda g: calistir([sys.executable, PROJE / "altyazi.py", dikey, "--dil", dil, *y_args,
                                          "-o", g], "altyazı"),
@@ -901,7 +1021,7 @@ def klip_uret(k, aday, a):
     kaynak_dosya = son_dosya
     try:
         alternatif = shorts.with_name(f"{kok}-yalniz-konusma.mp4")
-        sonuc = adim(klip, "ses", shorts, imza(imz_son, "ses_ayristir-2"),
+        sonuc = adim(klip, "ses", shorts, imza(imz_son, "ses_ayristir-3"),
                      lambda g: calistir([sys.executable, PROJE / "ses_ayristir.py", kaynak_dosya, "-o", g,
                                          *(["--kelimeler", kel_js] if kel_js.exists() else []),
                                          "--rapor", ses_rapor, "--alternatif", alternatif], "ses ayrıştırma"),
@@ -936,6 +1056,17 @@ def klip_uret(k, aday, a):
     if onizleme.exists():
         klip["onizleme"] = goreli(onizleme)
         print(f"    önizleme: {goreli(onizleme)}")
+    if yer.get("ust_oran"):                          # son kontrol: kamera bölümünde gerçekten yüz var mı
+        import kamera_tespit
+        try:
+            oran = kamera_tespit.ust_yuz_orani(son_dosya, yer["ust_oran"])
+        except Exception as e:                       # noqa: BLE001 - kontrol çalışmazsa sorun sayılmaz, yazılır
+            oran = None
+            uyarilar.append(f"yüz kontrolü çalışmadı ({e})")
+        klip["ust_yuz_orani"] = oran
+        if oran is not None and oran < UST_YUZ_MIN:
+            uyarilar.append(f"kadraj: bitmiş videonun kamera bölümünde yüz karelerin yalnız %{100 * oran:.0f}'inde "
+                            "görünüyor; kırpım yanlış yere oturmuş olabilir")
     kontrol, iyi = otomatik_kontrol(klip["zaman"], yer, ses, n_kelime, n_incele, uyarilar)
     klip["kontrol"] = kontrol
     klip["kalite_tahmini"] = "iyi" if iyi else "incele: " + ", ".join(kontrol["sorun"])
@@ -950,6 +1081,14 @@ def klip_uret(k, aday, a):
         print("    inceleme: klip yeniden üretildi, önceki inceleme sıfırlandı (not olarak saklandı)")
     klip.update(durum="üretildi", hata=None, dosya=goreli(son_dosya), uyarilar=uyarilar,
                 riskler=riskler(k, klip, yer, aday), uretim=simdi())
+    # kamera yok + neredeyse konuşma yok: yayıncının anı değil (tanıtım videosu, ara ekran, reklam)
+    # VAD yedeği gerektiyse olağan tanıma konuşma bulamamıştır: tanıtım videosunun içindeki eski yayın
+    # kesitleri VAD'la tanınıyor (Eray 00:05: 4 -> 17 kelime), yine de yayıncının anı değil
+    zayif = kel_js.exists() and bool(json.loads(kel_js.read_text(encoding="utf-8")).get("yedek_tanima"))
+    klip["bos_an"] = bool(yer.get("tespit_yok") and ((n_kelime or 0) < BOS_KELIME or zayif))
+    if klip["bos_an"]:
+        klip["kalite_tahmini"] = (f"elendi: kamera yok ve {'olağan tanımada konuşma bulunamadı' if zayif else f'{n_kelime or 0} kelime konuşma'}"
+                                  " (hazır video/ara ekran olabilir)")
     print(f"    kontrol : {klip['kalite_tahmini']}")
     for u in uyarilar:
         print(f"    uyarı   : {u}")
@@ -967,11 +1106,18 @@ def komut_uret(a):
         yerlesim_karari(k["kanal"])                  # bozuk profil en başta durdurur
     except profil.ProfilHatasi as e:
         raise SystemExit(f"Profil hatası ({k['kanal']}): {e}\nHiçbir klip üretilmedi; profili düzeltin.")
-    hatali = 0
-    for kok in k["secim"]:
+    altyazi_dosyasi_uygula(k)                        # Shorts/<yayın>/ALTYAZI DÜZELT.txt
+    hatali = tamam = 0
+    hedef = getattr(a, "hedef", None)            # otomatik: bu kadar sağlam klip olunca yedeklere geçme
+    for kok in list(k["secim"]):
+        if hedef and tamam >= hedef:
+            k["secim"].remove(kok)                   # gerekmeyen yedek
+            continue
         aday = next(x for x in k["adaylar"] if x["kok"] == kok)
         try:
             klip_uret(k, aday, a)
+            klip = k["klipler"].get(kok) or {}
+            tamam += klip.get("durum") == "üretildi" and not klip.get("bos_an")
         except (AdimHatasi, profil.ProfilHatasi) as e:
             klip = klip_kaydi(k, kok)
             klip.update(durum="hata", hata=str(e))
@@ -979,7 +1125,20 @@ def komut_uret(a):
             print(f"    HATA: {e}\n    (önceki başarılı dosyalar korundu)")
         finally:
             kayit_yaz(k)                             # her klipten sonra; yarıda kesilse de ilerleme kalır
+    # kamerası bulunamayanlar: sonraki kliplerde ölçü öğrenildiyse bir kez daha dene
+    tekrar = [kok for kok in k["secim"] if ((k["klipler"].get(kok) or {}).get("kamera_tespit") or {})
+              .get("karar") == "yok" and bilinen_kameralar(k, kok)]
+    for kok in tekrar:
+        print(f"\n{kok}: kamera bulunamamıştı; aynı yayının kamera ölçüleriyle yeniden deneniyor")
+        try:
+            klip_uret(k, next(x for x in k["adaylar"] if x["kok"] == kok), a)
+        except (AdimHatasi, profil.ProfilHatasi) as e:
+            print(f"    HATA: {e} (önceki dosya korundu)")
+        finally:
+            kayit_yaz(k)
     durum_tablosu(k)
+    hazir, n = cikti_paketi(k)
+    print(f"\nShorts: {goreli(hazir)} ({n} MP4; başlık/açıklama önerileri RAPOR.md'de)")
     if hatali:
         raise SystemExit(f"\n{hatali} klip hatalı. Sorunu giderip aynı komutu tekrar çalıştırın; "
                          "tamamlanan adımlar yeniden yapılmaz.")
@@ -1059,32 +1218,215 @@ def komut_durum(a):
 # otomatik: bağlantı -> adaylar -> uygun olanların tamamı -> rapor
 # --------------------------------------------------------------------------
 
+def baslik_onerisi(k, aday, klip):
+    """Kural tabanlı başlık: olay anında söylenen ilk 2-6 kelime; yoksa sohbetteki ifade."""
+    import altyazi
+    js = PROJE / klip["adimlar"]["dikey"]["dosya"]
+    js = js.with_name(js.stem + ".kelimeler.json")
+    o = klip["zaman"]["olay_klipte"]
+    soz = []
+    if js.exists():
+        veri = json.loads(js.read_text(encoding="utf-8"))
+        kel = [x["goster"] for x in altyazi.gorunen(veri, True, True)
+               if o - 1.0 <= x["bas"] <= o + 6.0 and "*" not in x["goster"]]
+        soz = [w.strip(".,;:") for w in kel][:6]
+    ust = sk.tr_upper if k.get("dil") == "tr" else str.upper
+    metin = " ".join(soz) if len(soz) >= 2 else ust(aday["ad"])
+    return metin[:70]
+
+
+def dosya_adi(s, en_fazla=60):
+    """Windows'ta geçerli, okunur dosya/klasör adı (emoji ve köşeli parantez yok: PowerShell'de joker)."""
+    s = re.sub(r'[<>:"/\\|?*\x00-\x1f\[\]]', " ", s)
+    s = "".join(c for c in s if c.isalnum() or c in " -_.,'!()&+")
+    s = re.sub(r"\s+", " ", s).strip(" .")
+    return s[:en_fazla].rstrip(" .") or "klip"
+
+
+def yayin_adi(k):
+    """'eray 2026-11-15 GTA5ELVEDA': kanal, yayın günü, komut/etiket ayıklanmış başlık."""
+    parca = [w for w in (k.get("baslik") or "").split() if not w.startswith(("!", "#", "@"))]
+    kelimeler, tek = [], ""
+    for w in parca:                               # "G T A 5" gibi aralıklı harfleri birleştir
+        if len(w) == 1:
+            tek += w
+            continue
+        if tek:
+            kelimeler.append(tek)
+            tek = ""
+        kelimeler.append(w)
+    if tek:
+        kelimeler.append(tek)
+    tarih = (k.get("baslangic") or "")[:10]
+    return dosya_adi(" ".join(x for x in (k.get("kanal") or k["vod"], tarih, " ".join(kelimeler)) if x), 50)
+
+
+def cikti_paketi(k):
+    """Nihai Shorts'ları Shorts/<yayın>/NN - <başlık>.mp4 olarak toplar (yalnız MP4; sabit bağlantı,
+    yer kaplamaz, olmazsa kopya). Başlık/açıklama önerileri k['cikti'] ile RAPOR.md'ye gider."""
+    import shutil
+    hedef = CIKTI / yayin_adi(k)
+    hedef.mkdir(parents=True, exist_ok=True)
+    for eski in hedef.glob("[0-9][0-9] - *.mp4"):  # önceki paket; asılları klipler/ altında duruyor
+        eski.unlink()
+    platform = "Kick" if k.get("platform") == "kick" else "Twitch"
+    adres = (f"https://kick.com/{k['kanal']}/videos/{k['vod']}" if platform == "Kick"
+             else f"https://www.twitch.tv/videos/{k['vod']}")
+    etiketler = " ".join(["#shorts", f"#{re.sub(r'[^0-9A-Za-z_]', '', k['kanal'])}", f"#{platform.lower()}",
+                          "#yayın" if k.get("dil") == "tr" else "#stream"])
+    dosyalar, kullanilan = [], set()
+    for a in k["adaylar"]:
+        klip = k["klipler"].get(a["kok"])
+        if (not klip or klip.get("durum") != "üretildi" or klip.get("bos_an")
+                or a["kok"] not in k.get("secim", [])):
+            continue
+        baslik = baslik_onerisi(k, a, klip)
+        ad = dosya_adi(baslik)
+        if ad.lower() in kullanilan:
+            ad = dosya_adi(f"{ad} {sk.sure_yaz(klip['zaman']['olay_vod']).replace(':', '.')}")
+        kullanilan.add(ad.lower())
+        mp4 = hedef / f"{len(dosyalar) + 1:02d} - {ad}.mp4"
+        try:
+            os.link(PROJE / klip["dosya"], mp4)
+        except OSError:
+            shutil.copy2(PROJE / klip["dosya"], mp4)
+        dosyalar.append({"dosya": mp4.name, "kok": a["kok"], "baslik": f"{baslik} | {k['yayinci']}",
+                         "aciklama": f"{k['yayinci']} yayınından ({platform}, "
+                                     f"{sk.sure_yaz(klip['zaman']['bas_vod'])}). Yayın: {adres}",
+                         "etiketler": etiketler})
+    k["cikti"] = {"klasor": goreli(hedef), "dosyalar": dosyalar}
+    kayit_yaz(k)
+    altyazi_dosyasi_yaz(k, hedef)
+    return hedef, len(dosyalar)
+
+
+ALTYAZI_DOSYASI = "ALTYAZI DÜZELT.txt"
+ALTYAZI_YARDIM = """# Altyazı düzeltme. Her satır videoda ekrana gelen bir altyazı satırıdır.
+#   - Yanlışsa metni düzeltin (büyük/küçük harf önemli değil).
+#   - Ekrana gelmesin istiyorsanız | işaretinden sonrasını boşaltın.
+#   - '!' = sesle kontrol edilmeli. Dinleyip doğruysa '!' işaretini silin.
+# Sonra aynı komutu tekrar çalıştırın:  python uretim.py otomatik <yayın bağlantısı>
+# Yalnız değiştirdiğiniz klipler yeniden üretilir. [no] ve zaman kısmını değiştirmeyin.
+"""
+
+
+def _kelime_js(klip):
+    d = PROJE / klip["adimlar"]["dikey"]["dosya"]
+    return d.with_name(d.stem + ".kelimeler.json")
+
+
+def _alternatif(js):
+    bak = js.with_suffix(".json.bak")
+    return json.loads(bak.read_text(encoding="utf-8")) if bak.exists() else None
+
+
+def altyazi_dosyasi_yaz(k, hedef):
+    """Shorts klasörüne düz metin düzeltme dosyası: her klip için videodaki altyazı satırları."""
+    import altyazi
+    sat = [ALTYAZI_YARDIM]
+    for d in (k.get("cikti") or {}).get("dosyalar", []):
+        js = _kelime_js(k["klipler"][d["kok"]])
+        if not js.exists():
+            continue
+        veri = json.loads(js.read_text(encoding="utf-8"))
+        sat += [f"# ===== {d['dosya']} =====", f"# klip {d['kok']} imza {altyazi.duz_imza(veri)}"]
+        for i, bas, supheli, metin in altyazi.duz_satirlar(veri, _alternatif(js)):
+            sat.append(f"[{i}] {int(bas // 60):02d}:{bas % 60:04.1f} {'!' if supheli else ' '} | {metin}")
+        sat.append("")
+    (hedef / ALTYAZI_DOSYASI).write_text("\n".join(sat), encoding="utf-8")
+
+
+def altyazi_dosyasi_uygula(k):
+    """Kullanıcının düz metin düzeltmelerini kelime kayıtlarına işler; değişen klipleri döndürür.
+    Kayıt dosya yazıldıktan sonra değiştiyse (imza tutmuyor) o klip atlanır, uyarılır."""
+    import altyazi
+    yol = PROJE / ((k.get("cikti") or {}).get("klasor") or "-") / ALTYAZI_DOSYASI
+    if not yol.exists():
+        return []
+    bloklar, kok, imz = {}, None, None
+    for satir in yol.read_text(encoding="utf-8").splitlines():
+        m = re.match(r"^#\s*klip\s+(\S+)\s+imza\s+(\w+)", satir)
+        if m:
+            kok, imz = m.groups()
+            bloklar[kok] = (imz, {})
+            continue
+        m = altyazi.DUZ_SATIR.match(satir)
+        if m and kok:
+            bloklar[kok][1][int(m[1])] = (m[2] == "!", m[3])
+    degisen = []
+    for kok, (imz, duzenlenen) in bloklar.items():
+        klip = k["klipler"].get(kok)
+        if not klip or "dikey" not in klip.get("adimlar", {}):
+            continue
+        js = _kelime_js(klip)
+        if not js.exists():
+            continue
+        veri = json.loads(js.read_text(encoding="utf-8"))
+        if altyazi.duz_imza(veri) != imz:
+            print(f"Uyarı: {kok} altyazı kaydı düzeltme dosyası yazıldıktan sonra değişmiş; "
+                  f"bu klibin düzeltmeleri uygulanmadı ({goreli(yol)})")
+            continue
+        n = altyazi.duz_uygula(veri, duzenlenen, _alternatif(js))
+        if n:
+            js.write_text(json.dumps(veri, ensure_ascii=False, indent=1), encoding="utf-8")
+            degisen.append((kok, n))
+    if degisen:
+        print("Altyazı düzeltmeleri uygulandı: " + ", ".join(f"{a} ({n} satır)" for a, n in degisen))
+    return degisen
+
+
+def duzeltme_imzasi(js):
+    """Elle düzeltme/onay varsa onların özeti (altyazı adımı yeniden yapılsın), yoksa boş."""
+    if not js.exists():
+        return ""
+    kel = json.loads(js.read_text(encoding="utf-8"))["kelimeler"]
+    elle = [(x["no"], x.get("duzeltme"), bool(x.get("dogrulandi"))) for x in kel
+            if x.get("duzeltme") is not None or x.get("dogrulandi")]
+    return imza(elle) if elle else ""
+
+
 def uretim_raporu(k):
     """Kısa insan okunur rapor: yayinlar/<id>/uretim/RAPOR.md"""
     sat = [f"# Üretim raporu: {k['yayinci']} · {k['vod']}", "", f"Başlık: {k['baslik']}  ",
            f"Tarih: {simdi()}", "",
            f"Aday: {len(k['adaylar'])} (eşiği aşan dilim {k['analiz']['aday_dilim']}; yayının ilk/son "
-           f"{KENAR // 60} dk'sı ve selamlaşma/bot/komut/link mesajları sayılmadı: {k['analiz']['elenen']})", "",
-           "| # | Olay | Klip | Puan | Açıklama | Kadraj | Ses | Altyazı | Otomatik kontrol | Dosya |",
-           "|---|---|---|---|---|---|---|---|---|---|"]
+           f"{KENAR // 60} dk'sı ve selamlaşma/bot/komut/link mesajları sayılmadı: {k['analiz']['elenen']})  ",
+           f"Yayının en yoğun %{100 - int(YOGUN_YUZDE * 100)}'luk diliminde olmadığı için elenen: "
+           f"{k['analiz'].get('yogun_disi', 0)} · aynı sahnede birleşen: {k['analiz'].get('birlesen', 0)}", ""]
+    cikti = k.get("cikti") or {}
+    ad_dosya = {d["kok"]: d for d in cikti.get("dosyalar", [])}
+    if cikti.get("dosyalar"):
+        sat += [f"## Yayına hazır: `{cikti['klasor']}`", "",
+                "| Dosya | Başlık önerisi | Açıklama önerisi |", "|---|---|---|"]
+        sat += [f"| {d['dosya']} | {d['baslik']} | {d['aciklama']} {d['etiketler']} |" for d in cikti["dosyalar"]]
+        sat += [""]
+    sat += ["## Adaylar", "",
+            "| # | Olay | Klip | Puan | Açıklama | Kadraj | Ses | Altyazı | Otomatik kontrol | Dosya |",
+            "|---|---|---|---|---|---|---|---|---|---|"]
     uretilen = iyi = 0
     elle = []
     for a in k["adaylar"]:
         klip = k["klipler"].get(a["kok"])
+        if a.get("birlesen"):
+            a = {**a, "aciklama": f"{a.get('aciklama', '')}; aynı sahne: {', '.join(a['birlesen'])}"}
         if a["kok"] not in k.get("secim", []):
+            neden = ("soru-cevap" if a["soru_cevap"] else "yedek, gerekmedi" if a.get("yedek") else "seçilmedi")
             sat.append(f"| {a['sira']} | {sk.sure_yaz(a.get('olay', a['t']))} | — | {a['puan']} | "
-                       f"{a.get('aciklama', '')} | seçilmedi{' (soru-cevap)' if a['soru_cevap'] else ''} | | | | |")
+                       f"{a.get('aciklama', '')} | {neden} | | | | |")
             continue
         if not klip or klip.get("durum") != "üretildi":
             sat.append(f"| {a['sira']} | {sk.sure_yaz(a.get('olay', a['t']))} | — | {a['puan']} | "
                        f"{a.get('aciklama', '')} | {(klip or {}).get('durum', '-')}: {(klip or {}).get('hata', '')} | | | | |")
             continue
-        uretilen += 1
-        iyi += klip.get("kalite_tahmini") == "iyi"
         z, kt = klip["zaman"], klip.get("kontrol", {})
+        dosya = (ad_dosya.get(a["kok"]) or {}).get("dosya") or f"— (ara dosya: `{klip['dosya']}`)"
         sat.append(f"| {a['sira']} | {sk.sure_yaz(z['olay_vod'])} | {sk.sure_yaz(z['bas_vod'])} +{z['sure']:g} sn | "
                    f"{a['puan']} | {a.get('aciklama', '')} | {kt.get('kadraj')} | {(klip.get('ses') or {}).get('karar')} | "
-                   f"{kt.get('altyazi')} | {klip.get('kalite_tahmini')} | `{klip['dosya']}` |")
+                   f"{kt.get('altyazi')} | {klip.get('kalite_tahmini')} | {dosya} |")
+        if klip.get("bos_an"):
+            continue
+        uretilen += 1
+        iyi += klip.get("kalite_tahmini") == "iyi"
         nedenler = [r for r in klip.get("riskler", []) if r.startswith(("ÜÇÜNCÜ", "müzik KALDIRILMADI"))]
         if klip.get("kalite_tahmini") != "iyi":
             nedenler.append(klip.get("kalite_tahmini"))
@@ -1094,21 +1436,93 @@ def uretim_raporu(k):
             "Tüm klipler telif açısından elle incelenmeli: müzik kaldırma tek başına telif hakkı ya da YouTube "
             "'yeniden kullanılan içerik' sorununu çözmez; bu sistem otomatik telif onayı vermez.", ""]
     for a, n in elle:
-        sat.append(f"- {a['sira']} {a['kok']}: " + ("; ".join(n) if n else "telif incelemesi (standart)"))
+        sat.append(f"- {(ad_dosya.get(a['kok']) or {}).get('dosya', a['kok'])}: " +("; ".join(n) if n else "telif incelemesi (standart)"))
     yol = kayit_yolu(k["vod"]).with_name("RAPOR.md")
     yol.write_text("\n".join(sat) + "\n", encoding="utf-8")
+    if (k.get("cikti") or {}).get("klasor"):      # videoların yanında da: bakılacak tek klasör
+        (PROJE / k["cikti"]["klasor"] / "RAPOR.md").write_text("\n".join(sat) + "\n", encoding="utf-8")
     return yol, uretilen, iyi
+
+
+DISK_EN_AZ_GB = 5                # 10 klip: parçalar + ara dosyalar ~2-3 GB
+
+
+def on_kontrol(platform=None):
+    """Uzun çalıştırmadan önce eksikleri bulur -> [(durum 'tamam'|'uyarı'|'HATA', ad, açıklama)].
+    Model yüklemez, ağa çıkmaz; birkaç saniye sürer."""
+    import importlib.util
+    import shutil
+    s = []
+    for arac in ("ffmpeg", "ffprobe"):
+        s.append(("tamam", arac, shutil.which(arac)) if shutil.which(arac)
+                 else ("HATA", arac, "bulunamadı; FFmpeg kurulu ve PATH'te olmalı"))
+    for modul, paket in (("faster_whisper", "faster-whisper"), ("onnxruntime", "onnxruntime"),
+                         ("cv2", "opencv-python-headless"), ("numpy", "numpy")):
+        s.append(("tamam", paket, "kurulu") if importlib.util.find_spec(modul)
+                 else ("HATA", paket, f"kurulu değil: pip install {paket}"))
+    for ad, yol in (("yüz modeli", PROJE / "modeller" / "face_detection_yunet_2023mar.onnx"),
+                    ("ses modeli", PROJE / "modeller" / "Kim_Vocal_2.onnx")):
+        s.append(("tamam", ad, goreli(yol)) if yol.is_file()
+                 else ("HATA", ad, f"{goreli(yol)} yok (indirme adresi kamera_tespit.py / ses_ayristir.py başında)"))
+    font = Path("C:/Windows/Fonts/seguibl.ttf")
+    s.append(("tamam", "yazı tipi", "Segoe UI Black") if font.is_file() or sys.platform != "win32"
+             else ("uyarı", "yazı tipi", "Segoe UI Black yok; altyazı başka yazı tipiyle çıkar"))
+    if platform != "kick":
+        s.append(("tamam", "TwitchDownloaderCLI", goreli(TDCLI)) if TDCLI.exists()
+                 else ("HATA" if platform == "twitch" else "uyarı", "TwitchDownloaderCLI",
+                       f"{goreli(TDCLI)} yok (yalnız Twitch için gerekli)"))
+    bos = shutil.disk_usage(PROJE).free / 1e9
+    s.append(("tamam" if bos >= DISK_EN_AZ_GB else "HATA", "disk", f"{bos:.0f} GB boş"
+              + ("" if bos >= DISK_EN_AZ_GB else f"; en az {DISK_EN_AZ_GB} GB gerekli")))
+    try:
+        import ctranslate2
+        gpu = ctranslate2.get_cuda_device_count()
+    except Exception:                                # noqa: BLE001
+        gpu = 0
+    cublas = True
+    if gpu and sys.platform == "win32":               # ekran kartı görünse de Whisper bu DLL'siz işlemciye düşer
+        import ctypes
+        try:
+            ctypes.WinDLL("cublas64_12.dll")
+        except OSError:
+            cublas = False
+    if gpu and cublas:
+        s.append(("tamam", "GPU", "CUDA hazır; altyazı ekran kartında"))
+    else:
+        s.append(("uyarı", "GPU", ("ekran kartı var ama cublas64_12.dll yok" if gpu else "CUDA yok")
+                  + ": altyazı işlemcide (klip başına ~20 sn, sorun değil)"))
+    return s
+
+
+def on_kontrol_yaz(s):
+    for durum, ad, aciklama in s:
+        print(f"  {durum:6s} {ad:20s} {aciklama}")
+    return not any(d == "HATA" for d, _, _ in s)
+
+
+def komut_kontrol(a):
+    print("Ön kontrol:")
+    if not on_kontrol_yaz(on_kontrol()):
+        raise SystemExit("\nEksikler var; giderilmeden üretim yarıda kalır.")
+    print("\nHazır.")
 
 
 def komut_otomatik(a):
     """Bağlantıdan uçtan uca: sohbet -> en iyi adaylar -> uygun olanların tamamı üretilir."""
+    sonuc = on_kontrol(vod_coz(a.vod)[0])
+    if not all(d != "HATA" for d, _, _ in sonuc):
+        print("Ön kontrol:")
+        on_kontrol_yaz(sonuc)
+        raise SystemExit("\nEksikler var; sohbet indirilmeden durduruldu (python uretim.py kontrol).")
     komut_aday(a)
     k = kayit_oku(vod_id(a.vod))
     uygun = [x for x in k["adaylar"] if not x["soru_cevap"] and x["sure"] >= KLIP_MIN]
     k["secim"] = [x["kok"] for x in uygun]
     kayit_yaz(k)
+    a.hedef = a.adet
     atlanan = [x for x in k["adaylar"] if x not in uygun]
-    print(f"\nOtomatik seçim: {len(uygun)} aday üretilecek" +
+    print(f"\nOtomatik seçim: en fazla {a.adet} klip; {len(uygun)} uygun aday (boş çıkan klip yerine "
+          f"sıradaki yedek üretilir)" +
           (f"; {len(atlanan)} atlandı (soru-cevap / çok kısa): " + ", ".join(x["kok"] for x in atlanan)
            if atlanan else ""))
     try:
@@ -1161,13 +1575,14 @@ def main():
     p.add_argument("--not", dest="not_", help="inceleme notu")
     p = alt.add_parser("durum", help="adaylar, üretim ve inceleme durumu")
     p.add_argument("vod")
+    alt.add_parser("kontrol", help="uzun çalıştırmadan önce ffmpeg, modeller, disk vb. eksik mi")
     a = ap.parse_args()
     if a.komut == "aday" and not 1 <= a.adet <= 30:
         ap.error("--adet 1-30 arası olmalı (önerilen 10-15)")
     if a.komut == "otomatik" and not 1 <= a.adet <= 30:
         ap.error("--adet 1-30 arası olmalı")
     {"aday": komut_aday, "sec": komut_sec, "uret": komut_uret, "incele": komut_incele,
-     "durum": komut_durum, "otomatik": komut_otomatik}[a.komut](a)
+     "durum": komut_durum, "otomatik": komut_otomatik, "kontrol": komut_kontrol}[a.komut](a)
 
 
 if __name__ == "__main__":

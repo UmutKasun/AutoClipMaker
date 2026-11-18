@@ -49,8 +49,9 @@ def cift(v):
     return max(2, int(v) // 2 * 2)
 
 
-def yerlestir(giris, b, kw, kh, cikis):
-    """Bölgeyi kw x kh kutusuna oranı bozmadan sığdırır; arka plan bulanık kopya."""
+def yerlestir(giris, b, kw, kh, cikis, ust_bosluk=None):
+    """Bölgeyi kw x kh kutusuna oranı bozmadan sığdırır; arka plan bulanık kopya.
+    ust_bosluk verilirse ortalamak yerine üstten bu kadar px aşağı yerleşir."""
     x, y, w, h = b
     olcek = min(kw / w, kh / h)
     sw, sh = cift(w * olcek), cift(h * olcek)
@@ -60,7 +61,8 @@ def yerlestir(giris, b, kw, kh, cikis):
             f"[{cikis}_b]scale={bw}:{bh}:force_original_aspect_ratio=increase,"
             f"crop={bw}:{bh},boxblur=6:2,eq=brightness=-0.18:saturation=0.8,"
             f"scale={kw}:{kh}[{cikis}_arka];"
-            f"[{cikis}_arka][{cikis}_on]overlay=(W-w)/2:(H-h)/2[{cikis}]")
+            f"[{cikis}_arka][{cikis}_on]overlay=(W-w)/2:"
+            f"{'(H-h)/2' if ust_bosluk is None else f'min({int(ust_bosluk)}\,H-h)'}[{cikis}]")
 
 
 def maskele(giris, m, cikis):
@@ -72,17 +74,17 @@ def maskele(giris, m, cikis):
             f"[{cikis}_0][{cikis}_b]overlay={x}:{y}[{cikis}]")
 
 
-def filtre_olustur(kamera, pencere, oyun, oyun_araliklari, ust_oran, maske=None):
+def filtre_olustur(kamera, pencere, oyun, oyun_araliklari, ust_oran, maske=None, oyun_ust=None):
     ust = cift(YUK * ust_oran)
     alt = YUK - ust
     oyunlu = bool(oyun_araliklari)
     parcalar = [f"[0:v]split={3 if oyunlu else 2}[k][p0]{'[o]' if oyunlu else ''}",
                 maskele("p0", maske, "p") if maske else "[p0]null[p]",
                 yerlestir("k", kamera, GEN, ust, "ust"),
-                yerlestir("p", pencere, GEN, alt, "pen")]
+                yerlestir("p", pencere, GEN, alt, "pen", oyun_ust)]
     if oyunlu:
         kosul = "+".join(f"between(t,{a},{b})" for a, b in oyun_araliklari)
-        parcalar += [yerlestir("o", oyun, GEN, alt, "oyn"),
+        parcalar += [yerlestir("o", oyun, GEN, alt, "oyn", oyun_ust),
                      f"[pen][oyn]overlay=0:0:enable='{kosul}'[alt]"]
     else:
         parcalar.append("[pen]null[alt]")
@@ -155,6 +157,8 @@ def main():
     ap.add_argument("--pencere", help=f"x1,y1,x2,y2 kaynak pikseli; profili geçersiz kılar ({PENCERE})")
     ap.add_argument("--oyun-bolge", help=f"x1,y1,x2,y2 kaynak pikseli; profili geçersiz kılar ({OYUN})")
     ap.add_argument("--ust-oran", type=float, help="üst bölüm oranı (profil ya da 0.34)")
+    ap.add_argument("--oyun-ust", type=int, help="alt bölümde oyunun üstündeki boşluk, px "
+                    "(verilmezse ortalanır; alttaki Shorts arayüzünden uzak tutmak için)")
     ap.add_argument("--maske", help="x1,y1,x2,y2: alt bölümde bulanıklaştırılacak bölge "
                     "(oyun kırpımına düşen kamera; yayıncı iki kez görünmesin)")
     ap.add_argument("--guvenli", action="store_true",
@@ -170,7 +174,8 @@ def main():
     if a.guvenli:
         catisan = [s for s, v in (("--duzen", a.duzen), ("--sahne", a.sahne), ("--kamera", a.kamera),
                                   ("--pencere", a.pencere), ("--oyun-bolge", a.oyun_bolge),
-                                  ("--oyun", a.oyun), ("--ust-oran", a.ust_oran), ("--maske", a.maske)) if v]
+                                  ("--oyun", a.oyun), ("--ust-oran", a.ust_oran), ("--maske", a.maske),
+                                  ("--oyun-ust", a.oyun_ust)) if v]
         if catisan:
             sys.exit(f"--guvenli şunlarla birlikte kullanılamaz: {', '.join(catisan)}\nVideo üretilmedi.")
         try:
@@ -189,7 +194,7 @@ def main():
                 f"{ad} {'—' if b[ad] is None else '{},{} {}x{}'.format(*b[ad])} ({k})"
                 for ad, k in kaynaklar.items()))
         filtre, ust, alt = filtre_olustur(b["kamera"], b["pencere"], b["oyun"], araliklar(a.oyun),
-                                          ust_oran, bolge(a.maske) if a.maske else None)
+                                          ust_oran, bolge(a.maske) if a.maske else None, a.oyun_ust)
     if a.filtre_goster:
         print(filtre.replace(";", ";\n"))
     cikti.parent.mkdir(parents=True, exist_ok=True)
