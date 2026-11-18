@@ -80,6 +80,13 @@ def filtre_olustur(kamera, pencere, oyun, oyun_araliklari, ust_oran):
     return ";".join(parcalar), ust, alt
 
 
+def guvenli_filtre(gen, yuk):
+    """Güvenli yerleşim: tüm kaynak kare kırpılmadan 1080x1920'ye sığar (bulanık arka plan).
+    Kamera/oyun bölgesi bilinmediğinde ya da güvenilmediğinde önemli görüntü kesilmez."""
+    filtre = yerlestir("0:v", (0, 0, cift(gen), cift(yuk)), GEN, YUK, "tam")
+    return filtre + f";[tam]fps={FPS},format=yuv420p,setsar=1[v]"
+
+
 def kaynak_cozunurluk(yol):
     try:
         cikti = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
@@ -138,6 +145,8 @@ def main():
     ap.add_argument("--pencere", help=f"x1,y1,x2,y2 kaynak pikseli; profili geçersiz kılar ({PENCERE})")
     ap.add_argument("--oyun-bolge", help=f"x1,y1,x2,y2 kaynak pikseli; profili geçersiz kılar ({OYUN})")
     ap.add_argument("--ust-oran", type=float, help="üst bölüm oranı (profil ya da 0.34)")
+    ap.add_argument("--guvenli", action="store_true",
+                    help="güvenli tam görüntü: kırpma yok, kaynak karenin tamamı sığdırılır")
     ap.add_argument("--filtre-goster", action="store_true", help="filter_complex'i yazdır")
     a = ap.parse_args()
 
@@ -146,15 +155,29 @@ def main():
     cikti = Path(a.cikti)
     if cikti.resolve() == Path(a.kaynak).resolve():
         sys.exit("Çıktı kaynakla aynı olamaz.")
-    try:
-        b, ust_oran, kaynaklar = yerlesimi_belirle(a, lambda: kaynak_cozunurluk(a.kaynak))
-    except profil.ProfilHatasi as e:
-        sys.exit(f"Düzen hatası: {e}\nVideo üretilmedi.")
-    if kaynaklar:
-        print(f"Düzen: {a.duzen} / sahne {a.sahne or 'varsayılan'}: " + "; ".join(
-            f"{ad} {'—' if b[ad] is None else '{},{} {}x{}'.format(*b[ad])} ({k})"
-            for ad, k in kaynaklar.items()))
-    filtre, ust, alt = filtre_olustur(b["kamera"], b["pencere"], b["oyun"], araliklar(a.oyun), ust_oran)
+    if a.guvenli:
+        catisan = [s for s, v in (("--duzen", a.duzen), ("--sahne", a.sahne), ("--kamera", a.kamera),
+                                  ("--pencere", a.pencere), ("--oyun-bolge", a.oyun_bolge),
+                                  ("--oyun", a.oyun), ("--ust-oran", a.ust_oran)) if v]
+        if catisan:
+            sys.exit(f"--guvenli şunlarla birlikte kullanılamaz: {', '.join(catisan)}\nVideo üretilmedi.")
+        try:
+            gen, yuk = kaynak_cozunurluk(a.kaynak)
+        except profil.ProfilHatasi as e:
+            sys.exit(f"Düzen hatası: {e}\nVideo üretilmedi.")
+        filtre, ust, alt = guvenli_filtre(gen, yuk), 0, YUK
+        print(f"Düzen: güvenli tam görüntü ({gen}x{yuk} kırpılmadan)")
+    else:
+        try:
+            b, ust_oran, kaynaklar = yerlesimi_belirle(a, lambda: kaynak_cozunurluk(a.kaynak))
+        except profil.ProfilHatasi as e:
+            sys.exit(f"Düzen hatası: {e}\nVideo üretilmedi.")
+        if kaynaklar:
+            print(f"Düzen: {a.duzen} / sahne {a.sahne or 'varsayılan'}: " + "; ".join(
+                f"{ad} {'—' if b[ad] is None else '{},{} {}x{}'.format(*b[ad])} ({k})"
+                for ad, k in kaynaklar.items()))
+        filtre, ust, alt = filtre_olustur(b["kamera"], b["pencere"], b["oyun"], araliklar(a.oyun),
+                                          ust_oran)
     if a.filtre_goster:
         print(filtre.replace(";", ";\n"))
     cikti.parent.mkdir(parents=True, exist_ok=True)

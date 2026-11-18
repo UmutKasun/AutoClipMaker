@@ -13,3 +13,6 @@ chat.json
 chat-emotes.json
 kick-*.json
 __pycache__/
+
+# Üretim akışı (uretim.py): videolar ve kişisel inceleme kaydı
+yayinlar/*/uretim/
