@@ -1,0 +1,15 @@
+# Büyük ikili ve üretilen dosyalar
+*.mp4
+*.zip
+*.part
+TwitchDownloaderCLI/
+kaynak/
+klipler/
+yayinlar/*/kaynak/
+yayinlar/*/klipler/
+
+# Sohbet kayıtları (üçüncü kişilerin mesajları) ve önbellekler
+chat.json
+chat-emotes.json
+kick-*.json
+__pycache__/
