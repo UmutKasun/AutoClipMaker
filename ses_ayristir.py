@@ -178,9 +178,19 @@ def main():
     ap.add_argument("--kelimeler", help="altyazi.py kelime JSON'u (konuşma koruma ölçümü için)")
     ap.add_argument("--rapor", help="karar raporu JSON yolu")
     ap.add_argument("--alternatif", help="orijinal ses korunursa yalnız-konuşma sürümünün yazılacağı yol")
+    ap.add_argument("--yalniz-esitle", action="store_true",
+                    help="müziği ayırma; orijinal sesi yalnız Shorts yüksekliğine (-14 LUFS) eşitle")
     a = ap.parse_args()
     t0 = time.time()
     mix = ses_oku(a.video)
+    if a.yalniz_esitle:
+        r = {"karar": "orijinal", "neden": "müzik ayrıştırma kapalı; ses yalnız eşitlendi"}
+        yaz(a.video, mix, a.cikti, r)
+        r.update(sure_sn=round(time.time() - t0, 1), yukseklik_hedef_lufs=HEDEF_LUFS)
+        print(json.dumps(r, ensure_ascii=False))
+        if a.rapor:
+            Path(a.rapor).write_text(json.dumps(r, ensure_ascii=False, indent=1), encoding="utf-8")
+        return
     konusma = konusmayi_ayir(mix)
     kel = json.loads(Path(a.kelimeler).read_text(encoding="utf-8"))["kelimeler"] if a.kelimeler else []
     r = karar_ver(mix, konusma, kel)

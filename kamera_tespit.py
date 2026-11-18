@@ -27,7 +27,9 @@ YUZ_ESIK = 0.75                # YuNet güveni
 KUME_ORAN = 0.6                # yüz karelerin en az bu oranında aynı yerde olmalı
 KESIK_YUK, KESIK_ORAN, KESIK_UST = 2.7, 1.6, 0.8   # çerçevesiz kamera: yükseklik = 2.7 yüz, üstte 0.8 yüz pay
 KESIK_ALT, KESIK_YAN = 0.55, 0.30                  # çerçevesiz kamera yüzü: alt %45'te ya da yan %30'larda
-GOVDE_GEN = 2.8                                    # gövde maskesi genişliği, yüz genişliği katı
+HAREKET_ORAN = 0.15                                # hareket kümesi en az bu kadar karede görünmeli
+YAKIN_KAT = 2.5                                   # bu kadar yüz genişliği içindeki kümeler aynı kişi (hareket)
+GOVDE_GEN = 2.8                                   # gövde maskesi genişliği, yüz genişliği katı
 ORAN_PAY = 0.08               # kamera kutusu 16:9'dan bu oranda uzunsa fazlası kırpılır
 AKTAR_ORAN = 0.4              # ölçü aktarımında tek yüz kümesinin en az kare oranı (birleşik KUME_ORAN)
 TAM_KAMERA_YUZ = 0.30          # yüz yüksekliği / kare yüksekliği bunu aşarsa tam kamera sahnesi
@@ -175,6 +177,12 @@ def oran_yasla(kareler, x1, y1, x2, y2, yuz):
     return secim[0], secim[1], f"16:9'a yaslandı ({taraf} {fazla} px)"
 
 
+def yakin(a, b, kat=YAKIN_KAT):
+    """İki yüz kutusu (x, y, w, h) aynı kişinin hareketi kadar yakın mı."""
+    return (abs(a[0] + a[2] / 2 - b[0] - b[2] / 2) < kat * a[2]
+            and abs(a[1] + a[3] / 2 - b[1] - b[3] / 2) < kat * a[2] and 0.6 <= b[2] / a[2] <= 1.6)
+
+
 def cercevesiz(kareler, kumeler, rapor, neden):
     """Arka planı kaldırılmış (çerçevesiz) kamera: kenar yok, yayıncı doğrudan oyunun üstünde.
     Kamera kutusu yüzden kurulur (baş + omuz, KESIK_ORAN en/boy); oyun kırpımında yalnız gövde
@@ -182,20 +190,26 @@ def cercevesiz(kareler, kumeler, rapor, neden):
     ekranın orta-üstündeki yüz (izlenen video, oyun karakteri) yayıncı sayılmaz."""
     h, w = kareler[0][1].shape[:2]
     n = len(kareler)
-    for kare, (fx, fy, fw, fh) in kumeler:
-        if len(kare) < KUME_ORAN * n:
-            break                                 # kümeler büyükten küçüğe sıralı
-        cx, cy = fx + fw / 2, fy + fh / 2
+    for ana, (fx, fy, fw, fh) in kumeler:
+        # yayıncı eğilir/kayar: yakındaki kümeler aynı kişi; kutu ve maske hareket aralığını kapsar
+        grup = [(k, b) for k, b in kumeler                   # tek karelik yanlış tespit (harita, logo) sayılmaz
+                if yakin((fx, fy, fw, fh), b) and (k is ana or len(k) >= HAREKET_ORAN * n)]
+        kare = set().union(*(k for k, _ in grup))
+        if len(ana) < AKTAR_ORAN * n or len(kare) < KUME_ORAN * n:
+            continue
+        gx1, gy1 = min(b[0] for _, b in grup), min(b[1] for _, b in grup)
+        gx2, gy2 = max(b[0] + b[2] for _, b in grup), max(b[1] + b[3] for _, b in grup)
+        cx, cy = (gx1 + gx2) / 2, (gy1 + gy2) / 2
         if not (cy > KESIK_ALT * h or cx < KESIK_YAN * w or cx > (1 - KESIK_YAN) * w):
             continue
         if fh > TAM_KAMERA_YUZ * h:
             continue
-        kh = min(h, int(KESIK_YUK * fh)) // 2 * 2
-        kw = min(w, int(kh * KESIK_ORAN)) // 2 * 2
+        kh = min(h, int(KESIK_YUK * fh + (gy2 - gy1 - fh))) // 2 * 2
+        kw = min(w, max(int(kh * KESIK_ORAN), int(gx2 - gx1 + 2 * fw))) // 2 * 2
         x1 = int(min(max(cx - kw / 2, 0), w - kw))
-        y1 = int(min(max(fy - KESIK_UST * fh, 0), h - kh))
-        gw = GOVDE_GEN * fw                         # gövde: yüzün altında, omuz genişliğinde, kareye kadar
-        govde = [int(max(0, cx - gw / 2)), int(max(0, fy - 0.4 * fh)), int(min(w, cx + gw / 2)), h]
+        y1 = int(min(max(gy1 - KESIK_UST * fh, 0), h - kh))
+        gw = GOVDE_GEN * fw + (gx2 - gx1 - fw)      # gövde: yüzün altında, omuz genişliğinde, kareye kadar
+        govde = [int(max(0, cx - gw / 2)), int(max(0, gy1 - 0.4 * fh)), int(min(w, cx + gw / 2)), h]
         _, _, degisim = kenar_haritalari(kareler)
         akt = degisim.copy()
         akt[govde[1]:govde[3], govde[0]:govde[2]] = 0
@@ -272,7 +286,9 @@ def tespit(video, bas=0.0, sure=None, n=KARE, bilinen=None):
         en = len(kumeler[0][0]) if kumeler else 0
         return yok(f"yayıncı yüzü karelerin yalnız {en}/{len(kareler)}'inde aynı yerde bulundu")
     kare_kumesi, yuz = kumeler[0]
-    for k2, _ in kumeler[1:]:
+    for k2, b2 in kumeler[1:]:
+        if yakin(yuz, b2):
+            continue                              # aynı kişi eğilmiş/kaymış: düzen değişimi değil
         if len(k2) >= 0.25 * len(kareler) and len(k2 - kare_kumesi) >= 0.2 * len(kareler):
             return {**rapor, "karar": "degisken",
                     "neden": "klip içinde yüz iki farklı konumda: kamera düzeni değişiyor olabilir"}

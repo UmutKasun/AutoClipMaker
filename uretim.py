@@ -75,11 +75,14 @@ OTOMATIK_ADET = 10
 SAHNE = 120                     # birbirine bu kadar sn'den yakın adaylar tek sahne (tek klip) sayılır
 SAHNE_BAGLAM = 20               # birleşen sahnede en güçlü olaydan en fazla bu kadar önce başlanır
 YOGUN_YUZDE = 0.90              # aday dilim, yayının bu yüzdelik dilim yoğunluğunda ya da üstünde olmalı
-DOYGUN_ORAN = 2.0               # en yoğun dilimler ortancanın bu katına çıkamıyorsa sohbet doygun (tavanda)
+KARMA_ORAN = 3.0                # 2.0-3.0 arası: yarı doygun, iki yöntemin adayları birlikte
+DOYGUN_ORAN = 2.0              # en yoğun dilimler ortancanın bu katına çıkamıyorsa sohbet doygun (tavanda)
 YEDEK = 5                      # boş çıkan klip yerine sırayla üretilecek yedek aday sayısı
 BOS_KELIME = 10                 # kamera yok + bundan az konuşma = yayıncı anı değil (tanıtım/ara ekran)
 UST_YUZ_MIN = 0.5               # bitmiş videoda kamera bölümünde yüz bundan az karede görünürse: kadraj sorunu
-CIKTI = PROJE / "Shorts"       # nihai MP4'ler: Shorts/<kanal> <tarih> <başlık>/NN - <başlık>.mp4
+BASLIK_EN_FAZLA = 8             # başlık önerisi en fazla bu kadar kelime
+BASLIK_SON_ATILIR = set("a an the and but or to of with for is ve ile bir ama da de ki ya mi mı".split())
+CIKTI = PROJE / "Shorts"      # nihai MP4'ler: Shorts/<kanal> <tarih> <başlık>/NN - <başlık>.mp4
 KENAR = 180                     # yayının ilk/son bu kadar sn'si aday olmaz
 
 
@@ -409,11 +412,15 @@ def dilim_yogunlugu(kalan, n_dilim):
     return [sum(min(v, sk.KISI_TAVAN) for v in c.values()) for c in say]
 
 
-def doygun_mu(yogunluk):
-    """Sohbet tavanda mı: en yoğun dilimler ortanca dilimin DOYGUN_ORAN katına çıkamıyorsa mesaj
-    sayısı artamıyor demektir (ohnePixel: 15 sn'de 80-190 mesaj, oran 1.5; Eray ~10)."""
+def doygunluk_orani(yogunluk):
+    """En yoğun dilimler (%99'luk) / ortanca dilim. Sohbet tavandaysa mesaj sayısı artamaz, oran düşer.
+    Ölçülen: ohnePixel 1.5 (doygun); Se7en 3.7, RRaenee 3.9, SCHRADIN 4.9, Kick 7.3-8.7 (doygun değil)."""
     s = sorted(x for x in yogunluk if x > 0)
-    return bool(s) and s[int(0.99 * (len(s) - 1))] < DOYGUN_ORAN * s[len(s) // 2]
+    return s[int(0.99 * (len(s) - 1))] / s[len(s) // 2] if s else float("inf")
+
+
+def doygun_mu(yogunluk):
+    return doygunluk_orani(yogunluk) < DOYGUN_ORAN
 
 
 def doygun_anlar(kalan, n_dilim, adci, pencerede):
@@ -487,29 +494,39 @@ def analiz(sohbet, adet):
     # mutlak eşik: sakin bölümdeki kısa hızlanma, yayının gerçekten yoğun anlarıyla yarışmasın
     yogunluk = dilim_yogunlugu(kalan, n_dilim)
     taban = sorted(yogunluk)[min(len(yogunluk) - 1, int(YOGUN_YUZDE * len(yogunluk)))]
-    yontem = "hacim"
-    if doygun_mu(yogunluk):
+    oran = doygunluk_orani(yogunluk)
+    ts_hacim = sorted(m["t"] for m in kalan)
+    ts_tepki = sorted(m["t"] for m in kalan if adci.tepki_mi(m["metin"]))
+    pencere = lambda t: KENAR <= t <= uzunluk - KENAR          # noqa: E731
+    hacim = [{**s, "yontem": "hacim"} for s in ham_secilen if s["agir"] >= taban]
+    if oran < DOYGUN_ORAN:
         # sohbet tavanda: hacim artamıyor, tepki mesajlarının sıçramasına bakılır; zamanlama da onlarla
         yontem = "tepki (doygun sohbet)"
-        ozet, ham_secilen = doygun_anlar(kalan, n_dilim, adci, lambda t: KENAR <= t <= uzunluk - KENAR)
-        yogun = ham_secilen
-        ts = sorted(m["t"] for m in kalan if adci.tepki_mi(m["metin"]))
+        ozet, tepki = doygun_anlar(kalan, n_dilim, adci, pencere)
+        yogun = [{**s, "yontem": "tepki"} for s in tepki]
+        ham_secilen = tepki
+    elif oran < KARMA_ORAN:
+        # ara bölge: iki yöntemin adayları birlikte yarışır (keskin eşik yerine kademeli geçiş)
+        yontem = "karma (yarı doygun sohbet)"
+        _, tepki = doygun_anlar(kalan, n_dilim, adci, pencere)
+        yogun = hacim + [{**s, "yontem": "tepki"} for s in tepki]
     else:
-        yogun = [s for s in ham_secilen if s["agir"] >= taban]
-        ts = sorted(m["t"] for m in kalan)
-    ozet["yogun_disi"] = len(ham_secilen) - len(yogun)
-    print(f"Seçim yöntemi: {yontem}")
+        yontem = "hacim"
+        yogun = hacim
+    ozet["yogun_disi"] = len(ham_secilen) - len(hacim) if yontem == "hacim" else 0
+    print(f"Seçim yöntemi: {yontem} (doygunluk oranı {oran:.2f})")
     sahneler = sahnelere_ayir(yogun)
     ozet["birlesen"] = sum(len(g) - 1 for g in sahneler)
     adaylar = []
     for sira, grup in enumerate(sahneler[:adet + YEDEK], 1):
         s = max(grup, key=lambda x: x["puan"])
         ad = adci.ad(s["metinler"]) or f"AN {sira}"
-        tb, tp, tson = tepki_araligi(ts, s["t"])
+        zaman = lambda x: ts_tepki if x["yontem"] == "tepki" else ts_hacim   # noqa: E731 - kendi yöntemiyle
+        tb, tp, tson = tepki_araligi(zaman(s), s["t"])
         olay = max(0.0, tb - GECIKME)
         baglam = None
         if len(grup) > 1:                         # aynı sahne: tepkisi en uzun süreni ve en erken başlangıç
-            uyeler = [tepki_araligi(ts, x["t"]) for x in grup]
+            uyeler = [tepki_araligi(zaman(x), x["t"]) for x in grup]
             tson = max(u[2] for u in uyeler)
             baglam = min(max(0.0, u[0] - GECIKME) for u in uyeler) - ONCE_OLAY
         bas, sure = klip_sinirlari(olay, tson, uzunluk, baglam)
@@ -526,7 +543,7 @@ def analiz(sohbet, adet):
                         "puan": round(s["puan"], 1), "aciklama": aciklama,
                         "tepki_araligi": [tb, tp, tson], "ucuncu_taraf_ipucu": ucuncu,
                         "baglam": baglam, "birlesen": [sk.sure_yaz(x["t"]) for x in grup if x is not s],
-                        "yedek": sira > adet,
+                        "yedek": sira > adet, "yontem": s["yontem"],
                         "mesaj": s["ham"], "kisi": s["kisi"], "ivme": round(s["ivme"], 2),
                         "tepki": round(s["tepki"], 3), "soru": round(s["soru"], 3),
                         "soru_cevap": s["soru_cevap"], "ornekler": ornek})
@@ -702,7 +719,7 @@ def riskler(k, klip, yer, aday=None):
     if ses.get("karar") == "ayristirildi":
         r.append("müzik ayrıştırıldı: oyun sesleri de kısıldı; şarkı sözleri konuşmayla kalmış olabilir")
     else:
-        r.append(f"müzik KALDIRILMADI ({ses.get('neden', 'ayrıştırma yok')}): elle telif incelemesi şart")
+        r.append(f"orijinal ses ({ses.get('neden', 'ayrıştırma yok')}): müzik varsa elle ele alınmalı")
     r.append("müzik kaldırma tek başına telif hakkı ya da YouTube 'yeniden kullanılan içerik' sorununu "
              "çözmez; otomatik telif onayı verilmez")
     return r
@@ -1020,11 +1037,14 @@ def klip_uret(k, aday, a):
     ses_rapor = shorts.with_name(f"{kok}-shorts.ses.json")
     kaynak_dosya = son_dosya
     try:
-        alternatif = shorts.with_name(f"{kok}-yalniz-konusma.mp4")
-        sonuc = adim(klip, "ses", shorts, imza(imz_son, "ses_ayristir-3"),
+        # varsayılan: müzik ayrılmaz (oyun sesini de götürüyordu; müziği kullanıcı kendisi ele alır),
+        # ses yalnız -14 LUFS'a eşitlenir. --muzik-ayir ile eski davranış.
+        ayir = bool(getattr(a, "muzik_ayir", False))
+        ses_args = (["--alternatif", shorts.with_name(f"{kok}-yalniz-konusma.mp4")] if ayir else ["--yalniz-esitle"])
+        sonuc = adim(klip, "ses", shorts, imza(imz_son, "ses_ayristir-4", ayir),
                      lambda g: calistir([sys.executable, PROJE / "ses_ayristir.py", kaynak_dosya, "-o", g,
                                          *(["--kelimeler", kel_js] if kel_js.exists() else []),
-                                         "--rapor", ses_rapor, "--alternatif", alternatif], "ses ayrıştırma"),
+                                         "--rapor", ses_rapor, *ses_args], "ses"),
                      lambda y: dogrula_dosya(y, beklenen=sure, boyut=(1080, 1920)))
         ses = json.loads(ses_rapor.read_text(encoding="utf-8")) if ses_rapor.exists() else None
         son_dosya, son_adim = shorts, "ses"
@@ -1228,8 +1248,16 @@ def baslik_onerisi(k, aday, klip):
     if js.exists():
         veri = json.loads(js.read_text(encoding="utf-8"))
         kel = [x["goster"] for x in altyazi.gorunen(veri, True, True)
-               if o - 1.0 <= x["bas"] <= o + 6.0 and "*" not in x["goster"]]
-        soz = [w.strip(".,;:") for w in kel][:6]
+               if o - 1.0 <= x["bas"] <= o + 8.0 and "*" not in x["goster"]][:BASLIK_EN_FAZLA]
+        for i, w in enumerate(kel):                   # cümle sonunda kes ("SIX FIGURES ONLY?" gibi)
+            if i >= 2 and w.endswith((".", "!", "?")):
+                kel = kel[:i + 1]
+                break
+        else:
+            kel = kel[:6]                             # cümle sonu yoksa kısa tut
+        soz = [w.strip(".,;:") for w in kel]
+        while len(soz) > 2 and sk.tr_lower(soz[-1]) in BASLIK_SON_ATILIR:
+            soz.pop()                                 # "...CAN'T GET A" -> "...CAN'T GET"
     ust = sk.tr_upper if k.get("dil") == "tr" else str.upper
     metin = " ".join(soz) if len(soz) >= 2 else ust(aday["ad"])
     return metin[:70]
@@ -1427,7 +1455,7 @@ def uretim_raporu(k):
             continue
         uretilen += 1
         iyi += klip.get("kalite_tahmini") == "iyi"
-        nedenler = [r for r in klip.get("riskler", []) if r.startswith(("ÜÇÜNCÜ", "müzik KALDIRILMADI"))]
+        nedenler = [r for r in klip.get("riskler", []) if r.startswith("ÜÇÜNCÜ")]
         if klip.get("kalite_tahmini") != "iyi":
             nedenler.append(klip.get("kalite_tahmini"))
         elle.append((a, nedenler))
@@ -1560,12 +1588,14 @@ def main():
                    help="profili olmayan kanal için güvenli tam görüntü yerleşimini onayla")
     p.add_argument("--kalite", default="1080p60", help="TwitchDownloaderCLI kalitesi (1080p60)")
     p.add_argument("--dil", help="altyazı dili (varsayılan: sohbetten tahmin)")
+    p.add_argument("--muzik-ayir", action="store_true", help="arka plan müziğini ayırmayı dene (oyun sesi de gider)")
     p = alt.add_parser("otomatik", help="bağlantıdan uçtan uca: en iyi anları bul, hepsini üret, rapor yaz")
     p.add_argument("vod", help="Twitch ya da Kick VOD bağlantısı")
     p.add_argument("--adet", type=int, default=OTOMATIK_ADET, help=f"en fazla aday ({OTOMATIK_ADET})")
     p.add_argument("--sohbet", help="mevcut chat.json")
     p.add_argument("--kalite", default="1080p60")
     p.add_argument("--dil", help="altyazı dili (tr/de/en; varsayılan: sohbetten tahmin)")
+    p.add_argument("--muzik-ayir", action="store_true", help="arka plan müziğini ayırmayı dene (oyun sesi de gider)")
     p.add_argument("--guvenli-onay", action="store_true", default=True, help=argparse.SUPPRESS)
     p = alt.add_parser("incele", help="elle telif/kalite inceleme sonucunu kaydet")
     p.add_argument("vod")

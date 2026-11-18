@@ -62,7 +62,7 @@ def yerlestir(giris, b, kw, kh, cikis, ust_bosluk=None):
             f"crop={bw}:{bh},boxblur=6:2,eq=brightness=-0.18:saturation=0.8,"
             f"scale={kw}:{kh}[{cikis}_arka];"
             f"[{cikis}_arka][{cikis}_on]overlay=(W-w)/2:"
-            f"{'(H-h)/2' if ust_bosluk is None else f'min({int(ust_bosluk)}\,H-h)'}[{cikis}]")
+            f"{'(H-h)/2' if ust_bosluk is None else f'min({int(ust_bosluk)}' + chr(92) + ',H-h)'}[{cikis}]")
 
 
 def maskele(giris, m, cikis):

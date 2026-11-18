@@ -75,7 +75,22 @@ def ses_oku(video):
     return np.frombuffer(ham, np.float32)
 
 
+def cuda_dll_yolu():
+    """NVIDIA'nın pip paketleri (nvidia-cublas-cu12, nvidia-cudnn-cu12) DLL'lerini site-packages/nvidia/*/bin
+    altına koyar; Windows bunları kendiliğinden bulmaz. ctranslate2 yüklenmeden önce arama yoluna eklenir."""
+    import importlib.util
+    import os
+    spec = importlib.util.find_spec("nvidia")
+    if sys.platform != "win32" or not spec or not spec.submodule_search_locations:
+        return
+    for kok in spec.submodule_search_locations:
+        for bin_ in Path(kok).glob("*/bin"):
+            os.add_dll_directory(str(bin_))
+            os.environ["PATH"] = f"{bin_}{os.pathsep}{os.environ.get('PATH', '')}"
+
+
 def model_yukle(ad, cihaz):
+    cuda_dll_yolu()
     try:
         import av  # noqa: F401
     except ImportError:
