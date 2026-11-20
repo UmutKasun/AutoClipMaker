@@ -2,6 +2,20 @@
 
 Twitch ya da Kick yayın bağlantısından en iyi anları bulup dikey (1080x1920), altyazılı Shorts üretir.
 
+## Kurulum (bir kez, Windows)
+
+1. [Python 3.12](https://www.python.org/downloads/) ve [FFmpeg](https://ffmpeg.org/download.html)
+   kurun; `ffmpeg` komut satırında çalışmalı (`winget install Gyan.FFmpeg`).
+2. Depo klasöründe:
+
+```
+python -m pip install -r requirements.txt
+python kurulum.py
+```
+
+`kurulum.py` modelleri ve TwitchDownloaderCLI'ı resmi kaynaklarından indirip SHA-256 ile doğrular,
+sonda ön kontrolü çalıştırır. İlk altyazıda Whisper modeli (~1.6 GB) kendiliğinden iner.
+
 ## Tek komut
 
 ```
@@ -81,12 +95,12 @@ Adım adım kullanım (aynı akışın parçaları): `aday`, `sec`, `uret`, `inc
 |---|---|---|
 | `Shorts/` | Nihai videolar, yayın başına bir klasör | hayır |
 | `yayinlar/<id>/` | Sohbet kaydı, indirilen parçalar, ara dosyalar (`uretim/klipler/`), kayıt (`uretim.json`) | hayır |
-| `modeller/` | YuNet yüz modeli, UVR Kim_Vocal_2 ses modeli (adresleri ilgili .py başında) | hayır |
-| `araclar/` | TwitchDownloaderCLI | hayır |
+| `modeller/` | YuNet yüz modeli, UVR Kim_Vocal_2 ses modeli (`kurulum.py` indirir) | hayır |
+| `araclar/` | TwitchDownloaderCLI (`kurulum.py` indirir) | hayır |
 
 Yeniden üretimde değişen ara dosyalar silinmez, `klipler/eski/` altına tarihli taşınır.
 
 ## Gerekenler
 
-Python 3.12, FFmpeg, `faster-whisper`, `numpy`, `onnxruntime`, `opencv-python-headless`.
+Windows, Python 3.12, FFmpeg; Python paketleri `requirements.txt`'te. Disk: ~5 GB boş.
 GPU için (isteğe bağlı): `pip install nvidia-cublas-cu12 "nvidia-cudnn-cu12==9.*"`.

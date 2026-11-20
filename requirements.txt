@@ -1,0 +1,8 @@
+# python -m pip install -r requirements.txt
+faster-whisper>=1.2
+onnxruntime>=1.20
+opencv-python-headless>=4.10
+numpy>=2.0
+
+# İsteğe bağlı, NVIDIA ekran kartında altyazı ~3 kat hızlı:
+#   python -m pip install nvidia-cublas-cu12 "nvidia-cudnn-cu12==9.*"
