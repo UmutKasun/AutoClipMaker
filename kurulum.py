@@ -82,7 +82,7 @@ def main():
         zip_yolu.unlink()
         print(f"tamam   {exe.relative_to(PROJE)}")
 
-    print("\nÖn kontrol:")
+    print("\nÖn kontrol:", flush=True)                # alt sürecin çıktısı araya karışmasın
     subprocess.run([sys.executable, str(PROJE / "uretim.py"), "kontrol"], cwd=PROJE)
 
 
