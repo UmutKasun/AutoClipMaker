@@ -1755,6 +1755,8 @@ def on_kontrol(platform=None):
     cublas = True
     if gpu and sys.platform == "win32":               # ekran kartı görünse de Whisper bu DLL'siz işlemciye düşer
         import ctypes
+        import altyazi
+        altyazi.cuda_dll_yolu()                       # altyazı da bu yolla bulur (nvidia-* pip paketleri)
         try:
             ctypes.WinDLL("cublas64_12.dll")
         except OSError:
