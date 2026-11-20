@@ -156,9 +156,16 @@ def yukseklik_olc(ses):
 def yaz(video, ses, cikti, rapor=None):
     """Görüntü olduğu gibi kopyalanır; ses Shorts yüksekliğine (-14 LUFS) iki geçişle eşitlenir, AAC 192k."""
     o = yukseklik_olc(ses)
-    af = (f"loudnorm=I={HEDEF_LUFS}:TP={HEDEF_TP}:LRA={HEDEF_LRA}:measured_I={o['input_i']}:"
-          f"measured_TP={o['input_tp']}:measured_LRA={o['input_lra']}:measured_thresh={o['input_thresh']}:"
-          f"offset={o['target_offset']}:linear=true,aresample={SR}")
+    try:
+        olculen = float(o["input_i"])
+    except (TypeError, ValueError):
+        olculen = float("-inf")
+    if not olculen > -70:                          # sessiz (Twitch'in kapattığı bölüm): eşitlenecek ses yok
+        af = f"aresample={SR}"
+    else:
+        af = (f"loudnorm=I={HEDEF_LUFS}:TP={HEDEF_TP}:LRA={HEDEF_LRA}:measured_I={o['input_i']}:"
+              f"measured_TP={o['input_tp']}:measured_LRA={o['input_lra']}:measured_thresh={o['input_thresh']}:"
+              f"offset={o['target_offset']}:linear=true,aresample={SR}")
     if rapor is not None:
         rapor["yukseklik_lufs_once"] = float(o["input_i"])
     p = subprocess.Popen(["ffmpeg", "-v", "error", "-y", "-nostdin", "-i", str(video), "-f", "f32le", "-ac", "2",

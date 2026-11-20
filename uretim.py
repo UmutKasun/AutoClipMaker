@@ -75,7 +75,17 @@ OTOMATIK_ADET = 10
 SAHNE = 120                     # birbirine bu kadar sn'den yakın adaylar tek sahne (tek klip) sayılır
 SAHNE_BAGLAM = 20               # birleşen sahnede en güçlü olaydan en fazla bu kadar önce başlanır
 YOGUN_YUZDE = 0.90              # aday dilim, yayının bu yüzdelik dilim yoğunluğunda ya da üstünde olmalı
-KARMA_ORAN = 3.0                # 2.0-3.0 arası: yarı doygun, iki yöntemin adayları birlikte
+ZAYIF_DK_MESAJ = 20            # analiz aralığında dakikada bundan az mesaj: sohbet an seçmeye yetmez -> ses
+ZAYIF_KISI_MIN = 8              # zayıf sohbette yine de sayılan sohbet anı: dilimde en az bu kadar kişi
+SES_KARE = 0.5                  # ses seviyesi dilimi, sn
+SES_TABAN_SN = 240              # olağan ses seviyesi: çevredeki bu kadar sn'nin ortancası
+SES_ESIK_DB = 8.0               # olağan seviyenin bu kadar üstü "yükselme"
+SES_EN_AZ_SN = 1.0              # yükselme en az bu kadar sürmeli (tek patlama sesi değil)
+SES_SESSIZ_DB = -55.0           # olağan seviye bunun altındaysa yayın sessiz/duraklatılmış sayılır
+CAGRI_PAY = 0.30               # dilimin bu payı aynı, heyecan olmayan ifadeyse (me, jbl, ps5) çağrı cevabı
+HEYECAN_EK = set("""w ww www l wtf omg noway nooo letsgo lets pog poggers kekw lul lulw omegalul icant lmao
+lmfao lmaoo holy clutch insane crazy dead yoo yooo sheesh bruh""".split())
+KARMA_ORAN = 3.0               # 2.0-3.0 arası: yarı doygun, iki yöntemin adayları birlikte
 DOYGUN_ORAN = 2.0              # en yoğun dilimler ortancanın bu katına çıkamıyorsa sohbet doygun (tavanda)
 YEDEK = 5                      # boş çıkan klip yerine sırayla üretilecek yedek aday sayısı
 BOS_KELIME = 10                 # kamera yok + bundan az konuşma = yayıncı anı değil (tanıtım/ara ekran)
@@ -460,6 +470,43 @@ def doygun_anlar(kalan, n_dilim, adci, pencerede):
     return {"ort": ort, "sd": sd, "esik": esik, "aday": len(adaylar), "disarida": len(adaylar) - len(icerde)}, secilen
 
 
+def heyecan_mi(metin, emotelar=frozenset()):
+    """Sıkı heyecan ölçütü: gülme, şok, ????/!!!!, uzatılmış bağırış (NOOOO), W/L, tepki kelimeleri,
+    kanal emote'ları. Çağrı cevapları ("me", "jbl", "ps5", "yes", "gta6") heyecan değildir."""
+    t = metin.strip()
+    if not t:
+        return False
+    if sk.GULME.search(t) or t.count("?") >= 2 or (t.count("!") >= 2 and len(t) < 30):
+        return True
+    if any(w in emotelar for w in t.split()):
+        return True
+    for w in re.findall(r"[^\W\d_]+", sk.tr_lower(t)):
+        if w in sk.TEPKI_KELIME or w in HEYECAN_EK or (len(w) >= 4 and sk.UZATMA.search(w)):
+            return True
+    return False
+
+
+def heyecan_suzgeci(adaylar, emotelar):
+    """Çağrı cevabı dalgalarını eler, kalanların puanını heyecan payıyla ayarlar -> (adaylar, elenen sayısı).
+    Clix: 'jbl'x114, 'me'x72, 'ps5'x118 dilimleri sohbetin en yoğunlarıydı ama heyecan değildi."""
+    from collections import Counter
+    kalan, elenen = [], 0
+    for s in adaylar:
+        if s.get("yontem") == "ses":                  # sesten bulunan an: sohbet içeriğine göre elenmez
+            kalan.append(s)
+            continue
+        sayim = Counter(sk.tr_lower(x).strip() for x in s["metinler"] if x.strip())
+        if not sayim:
+            continue
+        ust, adet = sayim.most_common(1)[0]
+        if adet / sum(sayim.values()) >= CAGRI_PAY and not heyecan_mi(ust, emotelar):
+            elenen += 1
+            continue
+        h = sum(heyecan_mi(x, emotelar) for x in s["metinler"]) / len(s["metinler"])
+        kalan.append({**s, "puan": s["puan"] * (0.6 + 0.8 * h), "heyecan": h})
+    return kalan, elenen
+
+
 def sahnelere_ayir(secilen):
     """Birbirine SAHNE sn'den yakın adayları zincirleyip gruplar; gruplar en iyi puana göre sıralı."""
     gruplar = []
@@ -471,7 +518,147 @@ def sahnelere_ayir(secilen):
     return sorted(gruplar, key=lambda g: -max(x["puan"] for x in g))
 
 
-def analiz(sohbet, adet):
+def sure_coz(s):
+    """'11:00:00', '90:00', '3600' -> saniye."""
+    if s is None:
+        return None
+    parca = [float(x) for x in str(s).strip().split(":")]
+    if not 1 <= len(parca) <= 3:
+        raise SystemExit(f"Süre anlaşılmadı: {s!r} (örn. 11:00:00)")
+    return sum(v * 60 ** i for i, v in enumerate(reversed(parca)))
+
+
+def ses_zarfi_tam(yol, kare=SES_KARE):
+    """Uzun ses dosyası -> kare sn'lik dilimlerin dB seviyesi (akışla okunur, bellek şişmez)."""
+    import numpy as np
+    sr = 8000
+    n = int(sr * kare)
+    p = subprocess.Popen(["ffmpeg", "-v", "error", "-nostdin", "-i", str(yol), "-vn", "-ac", "1", "-ar", str(sr),
+                          "-f", "s16le", "-"], stdout=subprocess.PIPE)
+    db, kalan = [], b""
+    while True:
+        parca = p.stdout.read(2 * n * 2000)
+        if not parca:
+            break
+        veri = kalan + parca
+        m = len(veri) // (2 * n)
+        x = np.frombuffer(veri[:m * 2 * n], np.int16).astype(np.float32).reshape(m, n) / 32768
+        db.append(10 * np.log10((x * x).mean(1) + 1e-10))
+        kalan = veri[m * 2 * n:]
+    p.wait()
+    if p.returncode != 0 or not db:
+        raise AdimHatasi("yayın sesi okunamadı")
+    return np.concatenate(db).astype(np.float32)
+
+
+def kick_ses_indir(k, ib, ie, hedef):
+    """Kick'te yalnız-ses varyantı yok: en düşük bant genişlikli akışın yalnız sesi alınır."""
+    master = k["kaynak_url"]
+    metin = http_metin(master)
+    bw = [(int(b), s) for b, s in re.findall(r"BANDWIDTH=(\d+)[^\n]*\n([^\n#]+)", metin)]
+    if not bw:
+        raise AdimHatasi("Kick HLS varyantı bulunamadı")
+    taban = master.rsplit("/", 1)[0] + "/"
+    url = min(bw)[1].strip()
+    url = url if url.startswith("http") else taban + url
+    bas = sk.tarih(k["baslangic"])
+    sec, ofs = segment_sec(hls_segmentleri(http_metin(url), url),
+                           bas + timedelta(seconds=ib), bas + timedelta(seconds=ie))
+    liste = hedef.with_name(hedef.stem + ".m3u8")
+    liste.write_text("#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:%d\n#EXT-X-MEDIA-SEQUENCE:0\n"
+                     % math.ceil(max(d for _, d, _ in sec)) +
+                     "".join(f"#EXTINF:{d:.3f},\n{u}\n" for _, d, u in sec) + "#EXT-X-ENDLIST\n", encoding="utf-8")
+    try:
+        calistir(["ffmpeg", "-v", "error", "-y", "-nostdin", "-protocol_whitelist", "file,http,https,tcp,tls,crypto",
+                  "-i", liste, "-ss", f"{ofs:.3f}", "-t", f"{ie - ib:.3f}", "-vn", "-c:a", "copy", hedef],
+                 "Kick ses indirme")
+    finally:
+        liste.unlink(missing_ok=True)
+
+
+def ses_hazirla(vod, platform, veri, a0, a1):
+    """Zayıf sohbet için yayının [a0, a1] sesinin seviye özeti (önbellekli). Büyük ses dosyası özeti
+    çıkarılınca silinir; yalnız yayinlar/<id>/ses_zarfi.npz kalır."""
+    import numpy as np
+    ozet = klasor(vod) / "ses_zarfi.npz"
+    if ozet.exists():
+        z = np.load(ozet)
+        if float(z["a0"]) <= a0 and float(z["a1"]) >= a1 - 1 and float(z["kare"]) == SES_KARE:
+            bas = int((a0 - float(z["a0"])) / SES_KARE)
+            return z["db"][bas:bas + int((a1 - a0) / SES_KARE)]
+    gecici = klasor(vod) / "ses.part.m4a"
+    gecici.unlink(missing_ok=True)
+    print(f"Sohbet zayıf: yayının sesi indiriliyor ({sk.sure_yaz(a0)}-{sk.sure_yaz(a1)}, yalnız ses)...")
+    try:
+        if platform == "Kick":
+            kick_ses_indir({"kaynak_url": veri.get("source"), "baslangic": veri.get("start_time")}, a0, a1, gecici)
+        else:
+            calistir([TDCLI, "videodownload", "--id", vod, "-q", "Audio", "-b", f"{int(a0)}s", "-e", f"{int(a1)}s",
+                      "-o", gecici, "--collision", "Overwrite", "--banner", "false"], "ses indirme")
+        db = ses_zarfi_tam(gecici)
+    finally:
+        gecici.unlink(missing_ok=True)
+    np.savez_compressed(ozet, db=db, kare=SES_KARE, a0=a0, a1=a0 + len(db) * SES_KARE)
+    return db
+
+
+def ses_anlar(db, a0, kalan, adci, pencere):
+    """Yayıncının o sıradaki olağan seviyesine (çevresindeki SES_TABAN_SN'nin ortancası) göre belirgin ses
+    yükselmesi: bağırma, şaşkınlık, kahkaha, ani oyun olayı - hiçbiri ayrıca öne çıkarılmaz. Sohbette o an
+    tepki varsa küçük bir ek puan. anlari_sec ile aynı alanlar + olay_ses/tepe_ses/son_ses."""
+    import bisect
+    import numpy as np
+    k = int(DILIM / SES_KARE)
+    nd = len(db) // k
+    if nd < 3:
+        return []
+    dil_med = np.median(db[:nd * k].reshape(nd, k), axis=1)
+    w = int(SES_TABAN_SN / DILIM / 2)
+    taban = np.array([np.median(dil_med[max(0, i - w):i + w + 1]) for i in range(nd)])
+    ts = [m["t"] for m in kalan]
+    tepkili = sorted(m["t"] for m in kalan if adci.tepki_mi(m["metin"]))
+    adaylar = []
+    for i in range(nd):
+        b = taban[i]
+        if b < SES_SESSIZ_DB:
+            continue                                   # yayın sessiz/duraklatılmış
+        fr = db[i * k:(i + 1) * k]
+        yuksek = fr > b + SES_ESIK_DB
+        asim = float(np.percentile(fr, 95) - b)
+        sure = float(yuksek.sum() * SES_KARE)
+        t = a0 + i * DILIM
+        if asim < SES_ESIK_DB or sure < SES_EN_AZ_SN or not pencere(t):
+            continue
+        j = i * k + int(np.argmax(fr))                 # en yüksek an
+        ilk = j
+        while ilk > i * k and db[ilk - 1] > b + SES_ESIK_DB - 3:
+            ilk -= 1
+        son = j
+        while son + 1 < len(db) and son - j < 30 / SES_KARE and db[son + 1] > b + SES_ESIK_DB - 3:
+            son += 1
+        # sohbet: olaydan sonraki ~30 sn (yayın gecikmesi + yazma)
+        i0, i1 = bisect.bisect_left(ts, t), bisect.bisect_left(ts, t + DILIM + 30)
+        msj = [kalan[x] for x in range(i0, i1)]
+        tepki = bisect.bisect_left(tepkili, t + DILIM + 30) - bisect.bisect_left(tepkili, t)
+        puan = 100 * (0.6 * min(asim / 20, 1) + 0.25 * min(sure / 6, 1) + 0.15 * min(tepki / 5, 1))
+        adaylar.append({"i": i, "t": t, "ham": len(msj), "kisi": len({m["ad"] for m in msj}), "agir": len(msj),
+                        "ivme": asim, "tepki": tepki / max(len(msj), 1), "soru": 0.0, "soru_cevap": False,
+                        "puan": puan, "metinler": [m["metin"] for m in msj], "yontem": "ses",
+                        "olay_ses": a0 + ilk * SES_KARE, "tepe_ses": a0 + j * SES_KARE,
+                        "son_ses": a0 + son * SES_KARE, "ses_sure": sure})
+    adaylar.sort(key=lambda a: -a["puan"])
+    secilen = []
+    for a in adaylar:
+        if all(abs(a["t"] - s["t"]) >= sk.ARALIK for s in secilen):
+            secilen.append(a)
+    return secilen
+
+
+def analiz(sohbet, adet, aralik=None, ses_getir=None):
+    """aralik: (bas, son) sn - yalnız yayının bu bölümü (ör. GTA kısmı; sonrası IRL) analiz edilir;
+    eşik, yoğunluk ve doygunluk da yalnız bu bölümden hesaplanır.
+    ses_getir(platform, veri, a0, a1) -> dB dizisi: sohbet zayıfsa (dakikada ZAYIF_DK_MESAJ'dan az) adaylar
+    yayıncının sesinden bulunur; verilmezse ya da ses alınamazsa klip uydurulmaz, durulur."""
     platform, mesajlar, emotelar, yayin_suresi, veri = sk.sohbet_oku(str(sohbet))
     if platform not in ("Twitch", "Kick"):
         raise SystemExit(f"Şimdilik yalnız Twitch ve Kick VOD'u destekleniyor (bulunan: {platform}).")
@@ -485,19 +672,28 @@ def analiz(sohbet, adet):
     else:
         uzunluk = float((veri.get("video") or {}).get("length") or 0) or max(m["t"] for m in kalan)
     son = max(yayin_suresi or 0, uzunluk, max(m["t"] for m in kalan))
+    a0, a1 = (aralik or (None, None))
+    a0, a1 = a0 or 0.0, min(a1 or son, son)
+    if a0 or a1 < son:
+        kalan = [m for m in kalan if a0 <= m["t"] < a1]
+        if not kalan:
+            raise SystemExit(f"{sk.sure_yaz(a0)}-{sk.sure_yaz(a1)} aralığında sayılacak mesaj yok.")
+        son = a1
     n_dilim = int(son // DILIM) + 1
     dil = sk.dil_tahmin(m["metin"] for m in kalan)
     adci = sk.Adlandirici(emotelar, dil)
-    # yayının ilk/son KENAR sn'si: katılım ve veda dalgası (an değil)
-    ozet, ham_secilen = sk.anlari_sec(kalan, n_dilim, DILIM, adci, max(4 * adet, 40),
-                                      pencerede=lambda t: KENAR <= t <= uzunluk - KENAR)
+    # yayının ilk/son KENAR sn'si: katılım ve veda dalgası (an değil); aralık yayının ortasında bitiyorsa
+    # o uçta kenar payı yok, yalnız klibin sığacağı kadar
+    alt_sinir = a0 if a0 else KENAR
+    ust_sinir = a1 - KLIP_MIN if a1 < uzunluk else uzunluk - KENAR
+    pencere = lambda t: alt_sinir <= t <= ust_sinir              # noqa: E731
+    ozet, ham_secilen = sk.anlari_sec(kalan, n_dilim, DILIM, adci, max(4 * adet, 40), pencerede=pencere)
     # mutlak eşik: sakin bölümdeki kısa hızlanma, yayının gerçekten yoğun anlarıyla yarışmasın
     yogunluk = dilim_yogunlugu(kalan, n_dilim)
     taban = sorted(yogunluk)[min(len(yogunluk) - 1, int(YOGUN_YUZDE * len(yogunluk)))]
     oran = doygunluk_orani(yogunluk)
     ts_hacim = sorted(m["t"] for m in kalan)
     ts_tepki = sorted(m["t"] for m in kalan if adci.tepki_mi(m["metin"]))
-    pencere = lambda t: KENAR <= t <= uzunluk - KENAR          # noqa: E731
     hacim = [{**s, "yontem": "hacim"} for s in ham_secilen if s["agir"] >= taban]
     if oran < DOYGUN_ORAN:
         # sohbet tavanda: hacim artamıyor, tepki mesajlarının sıçramasına bakılır; zamanlama da onlarla
@@ -514,7 +710,27 @@ def analiz(sohbet, adet):
         yontem = "hacim"
         yogun = hacim
     ozet["yogun_disi"] = len(ham_secilen) - len(hacim) if yontem == "hacim" else 0
-    print(f"Seçim yöntemi: {yontem} (doygunluk oranı {oran:.2f})")
+    dk_mesaj = len(kalan) / max((a1 - a0) / 60, 1)
+    if dk_mesaj < ZAYIF_DK_MESAJ:
+        # 4-5 kişinin aynı anda yazması "patlama" sayılmasın: an yayıncının sesinden bulunur;
+        # sohbette gerçekten çok kişinin tepki verdiği anlar da yarışmaya devam eder
+        print(f"Sohbet zayıf: dakikada {dk_mesaj:.1f} mesaj (eşik {ZAYIF_DK_MESAJ}); anlar sesten aranıyor")
+        if ses_getir is None:
+            raise SystemExit("Sohbet anları ayırt etmeye yetmiyor ve ses analizi kullanılamıyor; "
+                             "uydurma klip üretilmedi.")
+        try:
+            db = ses_getir(platform, veri, a0, a1)
+        except AdimHatasi as e:
+            raise SystemExit(f"Sohbet zayıf ve yayın sesi alınamadı ({e}); uydurma klip üretilmedi.")
+        ses = ses_anlar(db, a0, kalan, adci, pencere)
+        guclu = [s for s in yogun if s["kisi"] >= ZAYIF_KISI_MIN]
+        yontem = f"ses (zayıf sohbet: dakikada {dk_mesaj:.1f} mesaj)" + (f" + {len(guclu)} sohbet anı" if guclu else "")
+        yogun = ses + guclu
+        if not yogun:
+            raise SystemExit("Sohbet zayıf ve seste belirgin bir yükselme yok; güçlü an bulunamadı, "
+                             "uydurma klip üretilmedi.")
+    yogun, ozet["cagri"] = heyecan_suzgeci(yogun, emotelar)
+    print(f"Seçim yöntemi: {yontem} (doygunluk oranı {oran:.2f}); çağrı cevabı olarak elenen: {ozet['cagri']}")
     sahneler = sahnelere_ayir(yogun)
     ozet["birlesen"] = sum(len(g) - 1 for g in sahneler)
     adaylar = []
@@ -522,13 +738,21 @@ def analiz(sohbet, adet):
         s = max(grup, key=lambda x: x["puan"])
         ad = adci.ad(s["metinler"]) or f"AN {sira}"
         zaman = lambda x: ts_tepki if x["yontem"] == "tepki" else ts_hacim   # noqa: E731 - kendi yöntemiyle
-        tb, tp, tson = tepki_araligi(zaman(s), s["t"])
-        olay = max(0.0, tb - GECIKME)
+
+        def aralik_(x):
+            """(olay, tepe, tepki sonu): ses adayında olay doğrudan seste (sohbet gecikmesi yok)."""
+            if x["yontem"] == "ses":
+                return x["olay_ses"], x["tepe_ses"], x["son_ses"] + GECIKME
+            a, b, c = tepki_araligi(zaman(x), x["t"])
+            return max(0.0, a - GECIKME), b, c
+
+        olay, tp, tson = aralik_(s)
+        tb = olay + (0 if s["yontem"] == "ses" else GECIKME)
         baglam = None
         if len(grup) > 1:                         # aynı sahne: tepkisi en uzun süreni ve en erken başlangıç
-            uyeler = [tepki_araligi(zaman(x), x["t"]) for x in grup]
+            uyeler = [aralik_(x) for x in grup]
             tson = max(u[2] for u in uyeler)
-            baglam = min(max(0.0, u[0] - GECIKME) for u in uyeler) - ONCE_OLAY
+            baglam = min(u[0] for u in uyeler) - ONCE_OLAY
         bas, sure = klip_sinirlari(olay, tson, uzunluk, baglam)
         gorulen, ornek = set(), []
         for m in s["metinler"]:
@@ -536,8 +760,12 @@ def analiz(sohbet, adet):
                 gorulen.add(m.strip().lower())
                 ornek.append(m.strip()[:60])
         ucuncu = sum(bool(UCUNCU_TARAF.search(m)) for m in s["metinler"])
-        aciklama = (f"sohbet {s['ivme']:.1f}x hızlandı, {s['kisi']} kişi, tepki %{100 * s['tepki']:.0f}; "
-                    f"tepki {sk.sure_yaz(tb)}-{sk.sure_yaz(tson)}")
+        if s["yontem"] == "ses":
+            aciklama = (f"ses {s['ivme']:.0f} dB yükseldi, {s['ses_sure']:.1f} sn; sohbet {s['ham']} mesaj "
+                        f"({s['kisi']} kişi)")
+        else:
+            aciklama = (f"sohbet {s['ivme']:.1f}x hızlandı, {s['kisi']} kişi, tepki %{100 * s['tepki']:.0f}; "
+                        f"tepki {sk.sure_yaz(tb)}-{sk.sure_yaz(tson)}")
         adaylar.append({"sira": sira, "kok": f"{saat(s['t'])}-{sk.ascii_ad(ad, dil)[:30]}",
                         "t": s["t"], "olay": olay, "bas": bas, "sure": sure, "ad": ad,
                         "puan": round(s["puan"], 1), "aciklama": aciklama,
@@ -553,6 +781,7 @@ def analiz(sohbet, adet):
                    "aday_dilim": ozet["aday"], "elenen": dict(elenen),
                    "kenar_disi": ozet["disarida"], "yogun_disi": ozet["yogun_disi"],
                    "yogun_esik": taban, "birlesen": ozet["birlesen"], "yontem": yontem,
+                   "cagri_cevabi": ozet["cagri"],
                    "kapsam": {"ilk_sn": round(zamanlar[0], 1), "son_sn": round(zamanlar[-1], 1),
                               "en_uzun_bosluk_sn": round(bosluk[0], 1), "bosluk_bas_sn": round(bosluk[1], 1)}}
     if platform == "Kick":
@@ -618,7 +847,12 @@ def komut_aday(a):
             sohbet_indir(vod, sohbet)
     else:
         print(f"Sohbet kaydı mevcut, yeniden indirilmedi: {goreli(sohbet)}")
-    meta, adaylar = analiz(sohbet, a.adet)
+    aralik = (sure_coz(getattr(a, "bas", None)), sure_coz(getattr(a, "son", None)))
+    if any(aralik):
+        print(f"Analiz aralığı: {sk.sure_yaz(aralik[0] or 0)} - {sk.sure_yaz(aralik[1]) if aralik[1] else 'son'}")
+    meta, adaylar = analiz(sohbet, a.adet, aralik if any(aralik) else None,
+                           ses_getir=lambda p, v, a0, a1: ses_hazirla(vod, p, v, a0, a1))
+    meta["analiz"]["aralik"] = list(aralik) if any(aralik) else None
     k = kayit_oku(vod, zorunlu=False) or {"surum": 1, "vod": vod, "secim": [], "oyun_araliklari": {},
                                            "klipler": {}}
     k.update(meta, sohbet=goreli(sohbet), adaylar=adaylar, guncelleme=simdi(),
@@ -1022,7 +1256,7 @@ def klip_uret(k, aday, a):
         else:
             y_args = []
         duz = duzeltme_imzasi(kel_js)                 # elle düzeltme varsa altyazı yeniden yakılır
-        imz_son = imza(imz_dikey, dil, y_args, "tani-4", *([duz] if duz else []))
+        imz_son = imza(imz_dikey, dil, y_args, "tani-4", "maske-2", *([duz] if duz else []))
         sonuc = adim(klip, "altyazi", altyazili, imz_son,
                      lambda g: calistir([sys.executable, PROJE / "altyazi.py", dikey, "--dil", dil, *y_args,
                                          "-o", g], "altyazı"),
@@ -1112,8 +1346,12 @@ def klip_uret(k, aday, a):
     # VAD yedeği gerektiyse olağan tanıma konuşma bulamamıştır: tanıtım videosunun içindeki eski yayın
     # kesitleri VAD'la tanınıyor (Eray 00:05: 4 -> 17 kelime), yine de yayıncının anı değil
     zayif = kel_js.exists() and bool(json.loads(kel_js.read_text(encoding="utf-8")).get("yedek_tanima"))
-    klip["bos_an"] = bool(yer.get("tespit_yok") and ((n_kelime or 0) < BOS_KELIME or zayif))
-    if klip["bos_an"]:
+    # sesi tamamen yok: Twitch telifli müzik nedeniyle VOD'un o bölümünü sessize alır; böyle klip kullanılamaz
+    sessiz = any(u.startswith("ses tamamen sessiz") for u in uyarilar)
+    klip["bos_an"] = bool(sessiz or (yer.get("tespit_yok") and ((n_kelime or 0) < BOS_KELIME or zayif)))
+    if sessiz:
+        klip["kalite_tahmini"] = "elendi: ses yok (Twitch bu bölümün sesini telif nedeniyle kapatmış olabilir)"
+    elif klip["bos_an"]:
         klip["kalite_tahmini"] = (f"elendi: kamera yok ve {'olağan tanımada konuşma bulunamadı' if zayif else f'{n_kelime or 0} kelime konuşma'}"
                                   " (hazır video/ara ekran olabilir)")
     print(f"    kontrol : {klip['kalite_tahmini']}")
@@ -1579,6 +1817,8 @@ def main():
     p = alt.add_parser("aday", help="sohbeti indir/analiz et, adayları listele")
     p.add_argument("vod", help="Twitch VOD bağlantısı ya da ID")
     p.add_argument("--adet", type=int, default=ADET, help=f"en fazla aday (10-15, varsayılan {ADET})")
+    p.add_argument("--bas", help="yalnız bu andan sonrası, örn. 00:30:00")
+    p.add_argument("--son", help="yalnız bu ana kadarı, örn. 11:00:00")
     p.add_argument("--sohbet", help="mevcut chat.json (verilmezse yayinlar/<id>/chat.json, yoksa indirilir)")
     p = alt.add_parser("sec", help="üretilecek adayları seç")
     p.add_argument("vod")
@@ -1599,6 +1839,8 @@ def main():
     p = alt.add_parser("otomatik", help="bağlantıdan uçtan uca: en iyi anları bul, hepsini üret, rapor yaz")
     p.add_argument("vod", help="Twitch ya da Kick VOD bağlantısı")
     p.add_argument("--adet", type=int, default=OTOMATIK_ADET, help=f"en fazla aday ({OTOMATIK_ADET})")
+    p.add_argument("--bas", help="yalnız bu andan sonrası, örn. 00:30:00")
+    p.add_argument("--son", help="yalnız bu ana kadarı, örn. 11:00:00 (sonrası IRL vb.)")
     p.add_argument("--sohbet", help="mevcut chat.json")
     p.add_argument("--kalite", default="1080p60")
     p.add_argument("--dil", help="altyazı dili (tr/de/en; varsayılan: sohbetten tahmin)")

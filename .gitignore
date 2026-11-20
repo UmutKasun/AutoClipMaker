@@ -5,8 +5,8 @@
 araclar/
 
 
-yayinlar/*/kaynak/
-yayinlar/*/klipler/
+# Yayın verisi: sohbet kayıtları (üçüncü kişilerin mesajları), indirilen parçalar, ses özetleri, ara dosyalar
+yayinlar/
 
 # Sohbet kayıtları (üçüncü kişilerin mesajları) ve önbellekler
 chat.json

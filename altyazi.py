@@ -57,7 +57,8 @@ AGIR_KUFUR = ("amk", "amq", "amına", "amina", "amın", "amcık", "amcik", "oros
               "yarak", "siktir", "sikerim", "sikeyim", "sikik", "sikiş", "sikis", "piç",
               "pezeven", "kahpe", "yavşak", "yavsak", "ibne", "götveren", "ananı", "anani",
               "hurensohn", "fotze", "wichser", "fick", "missgeburt", "schlampe", "arschloch",
-              "spast", "fuck", "motherf", "cunt", "bitch")
+              "spast", "fuck", "motherf", "cunt", "bitch",
+              "nigg", "fagg")                           # ırkçı/homofobik hakaretler: YouTube'da uyarı sebebi
 AGIR_KUFUR_TAM = {"aq", "mk", "oç", "oc", "sik", "awk"}
 NASIL = ("Görünen metni değiştirmek için ilgili kelimede \"duzeltme\": \"yeni metin\" yazın; "
          "kelimeyi gizlemek için \"duzeltme\": \"\". \"metin\" ham transkripsiyondur, değiştirmeyin. "
